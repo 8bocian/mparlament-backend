@@ -16,7 +16,11 @@ class LoginRequest(BaseModel):
 
 
 class UserPublic(BaseModel):
-    """``{id, username, name, role, club, permissions}`` — no password (spec §4.1, C10)."""
+    """``{id, username, name, role, club, group, permissions}`` — no password (spec §4.1, C10).
+
+    ``group`` is the recipient-selection field the FE reads from ``GET /api/users`` (doc 03 #43);
+    it is optional so users without a group (e.g. the admin) serialize it as ``null``.
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -25,6 +29,7 @@ class UserPublic(BaseModel):
     name: str
     role: str
     club: str | None = None
+    group: str | None = None
     permissions: list[str]
 
 
