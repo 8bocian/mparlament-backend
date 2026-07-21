@@ -16,6 +16,10 @@ from mparlament.slices.sessions.infrastructure.models import (  # noqa: F401
     SessionModel,
     SpeakerModel,
 )
+from mparlament.slices.votings.infrastructure.models import (  # noqa: F401
+    VoteModel,
+    VotingModel,
+)
 
 __all__ = [
     "Base",
@@ -23,4 +27,6 @@ __all__ = [
     "SessionModel",
     "SpeakerModel",
     "UserModel",
+    "VoteModel",
+    "VotingModel",
 ]
