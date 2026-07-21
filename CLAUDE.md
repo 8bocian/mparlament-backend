@@ -58,6 +58,28 @@ Before the branch-per-feature flow can run, `main` must be established — e.g. 
 (project scaffolding / `plan_steps`) on a `main` branch. Confirm with the user before creating the
 initial commit or renaming `master` → `main`.
 
+## Implementing a plan_steps doc (standing procedure)
+
+When the user points you at a `plan_steps/*.md` doc (e.g. "implement plan_steps/05-votings.md",
+"do 05", or via the `/feature` command), follow this procedure **without needing it repeated**:
+
+1. **Read first:** `plan_steps/README.md`, `plan_steps/CONVENTIONS.md`, then the target doc.
+   `BACKEND_SPEC.md` is the source of truth for every request/response shape — match it exactly
+   (wrapper keys, Polish messages, status codes). If the doc and the spec disagree, **stop and
+   ask** rather than guessing.
+2. **Branch:** create `feature/<doc-stem>` from an up-to-date `main`
+   (e.g. `plan_steps/05-votings.md` → `feature/05-votings`). Never work on `main` directly.
+3. **Build test-first** in the doc's TDD checklist order: domain unit → application use-case →
+   API integration (`httpx.AsyncClient`). Red → green → refactor. Commit in small steps.
+4. **Stay in the slice:** implement only what the target doc covers. Do not touch other slices
+   except the shared wiring the doc explicitly requires (e.g. registering the router in `main.py`).
+5. **Merge when green:** only when the slice's tests AND the full `pytest` suite pass, run
+   `git merge --no-ff feature/<doc-stem>` into `main`, then delete the branch.
+6. **Report:** summarize what was built, test results, and anything that deviated from the doc.
+
+Only commit/push when the user has asked you to work the feature (pointing you at the doc counts
+as that authorization for local branch commits + the merge to `main`).
+
 ## Testing
 
 TDD is mandatory. Order within a slice: domain unit tests → application use-case tests → API
