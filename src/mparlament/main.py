@@ -11,6 +11,7 @@ from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from mparlament.shared.api import register_exception_handlers
 from mparlament.shared.config import Settings, get_settings
 
 # Slice routers are appended here as slices are implemented.
@@ -37,7 +38,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["Authorization", "Content-Type"],
     )
 
-    # Exception handlers (DomainError -> {message}) are registered in slice 01.
+    # Map DomainError -> {"message": ...} with the right status (CONVENTIONS C11).
+    register_exception_handlers(app)
 
     app.include_router(health_router, prefix="/api")
     for router in SLICE_ROUTERS:
