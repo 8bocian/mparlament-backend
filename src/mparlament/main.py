@@ -16,10 +16,15 @@ from mparlament.shared.auth import set_user_reader
 from mparlament.shared.config import Settings, get_settings
 from mparlament.slices.auth_identity.api.router import router as auth_identity_router
 from mparlament.slices.auth_identity.infrastructure.reader import SqlAlchemyUserReader
+from mparlament.slices.sessions.api.router import router as sessions_router
 from mparlament.slices.users.api.router import router as users_router
 
 # Slice routers are appended here as slices are implemented.
-SLICE_ROUTERS: list[APIRouter] = [auth_identity_router, users_router]
+SLICE_ROUTERS: list[APIRouter] = [
+    auth_identity_router,
+    users_router,
+    sessions_router,
+]
 
 health_router = APIRouter()
 
