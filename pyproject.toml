@@ -1,15 +1,45 @@
 [project]
 name = "mparlament-backend"
 version = "0.1.0"
-description = ""
+description = "Backend for Parlament Młodych RP (FastAPI + SQLAlchemy async)"
 authors = [
     {name = "oskar",email = "oskar.mozdzen@gmail.com"}
 ]
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.12"
 dependencies = [
+    "fastapi (>=0.115,<1.0)",
+    "uvicorn[standard] (>=0.34,<1.0)",
+    "sqlalchemy[asyncio] (>=2.0,<3.0)",
+    "aiosqlite (>=0.20,<1.0)",
+    "alembic (>=1.14,<2.0)",
+    "pydantic (>=2.0,<3.0)",
+    "pydantic-settings (>=2.0,<3.0)",
+    "python-multipart (>=0.0.18,<1.0)",
+    "pyjwt (>=2.10,<3.0)",
+    "passlib[bcrypt] (>=1.7,<2.0)",
 ]
 
+[tool.poetry]
+packages = [{ include = "mparlament", from = "src" }]
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8.0,<9.0"
+pytest-asyncio = ">=0.24,<1.0"
+httpx = ">=0.28,<1.0"
+anyio = ">=4.0,<5.0"
+ruff = ">=0.8,<1.0"
+mypy = ">=1.13,<2.0"
+
+# Async tests run on the anyio pytest plugin (mark with @pytest.mark.anyio);
+# pytest-asyncio is also a declared dev dep for teams that prefer it.
+[tool.pytest.ini_options]
+testpaths = ["tests", "src"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
