@@ -12,10 +12,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from mparlament.shared.api import register_exception_handlers
+from mparlament.shared.auth import set_user_reader
 from mparlament.shared.config import Settings, get_settings
+from mparlament.slices.auth_identity.api.router import router as auth_identity_router
+from mparlament.slices.auth_identity.infrastructure.reader import SqlAlchemyUserReader
 
 # Slice routers are appended here as slices are implemented.
-SLICE_ROUTERS: list[APIRouter] = []
+SLICE_ROUTERS: list[APIRouter] = [auth_identity_router]
 
 health_router = APIRouter()
 
@@ -40,6 +43,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # Map DomainError -> {"message": ...} with the right status (CONVENTIONS C11).
     register_exception_handlers(app)
+
+    # Supply the shared auth deps with a concrete identity reader (doc 01 UserReader port).
+    set_user_reader(SqlAlchemyUserReader())
 
     app.include_router(health_router, prefix="/api")
     for router in SLICE_ROUTERS:

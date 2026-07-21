@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from mparlament.shared.db import Base
 
-# Slice models are imported below as slices are implemented, e.g.:
-#   from mparlament.slices.auth_identity.infrastructure.models import UserModel  # noqa: F401
+# Slice models are imported below as slices are implemented.
+from mparlament.slices.auth_identity.infrastructure.models import UserModel  # noqa: F401
 
-__all__ = ["Base"]
+__all__ = ["Base", "UserModel"]
