@@ -44,6 +44,9 @@ from mparlament.slices.votings.application.use_cases import (
     ListVotingsUseCase,
     UpdateVotingUseCase,
 )
+from mparlament.slices.amendments.infrastructure.repository import (
+    AmendmentLinkedItemStatusUpdater,
+)
 from mparlament.slices.resolutions.infrastructure.repository import (
     ResolutionLinkedItemStatusUpdater,
 )
@@ -55,11 +58,33 @@ from mparlament.slices.votings.infrastructure.repository import (
 
 router = APIRouter(tags=["votings"])
 
+
+class _CompositeLinkedItemStatusUpdater:
+    """Fan an archived voting's result out to every linked-item updater (#14 cascade).
+
+    Each delegate is a no-op for item types it does not own, so composing the resolution (doc 06)
+    and amendment (doc 07) updaters lets a single archive flip whichever linked item applies.
+    """
+
+    def __init__(self, *updaters) -> None:
+        self._updaters = updaters
+
+    async def update_status(
+        self, session, item_type, item_id, status  # noqa: ANN001
+    ) -> None:
+        for updater in self._updaters:
+            await updater.update_status(session, item_type, item_id, status)
+
+
 _votings = SqlAlchemyVotingRepository()
 _votes = SqlAlchemyVoteRepository()
 _directory = SqlAlchemyUserDirectory()
 _storage = LocalDiskStorage()
-_linked = ResolutionLinkedItemStatusUpdater()  # doc 06 cascade: archive → resolution status.
+# doc 06/07 cascade: archive → linked resolution/amendment status.
+_linked = _CompositeLinkedItemStatusUpdater(
+    ResolutionLinkedItemStatusUpdater(),
+    AmendmentLinkedItemStatusUpdater(),
+)
 
 _list = ListVotingsUseCase(_votings, _votes, _directory)
 _get = GetVotingUseCase(_votings, _votes, _directory)

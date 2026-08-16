@@ -10,6 +10,9 @@ from __future__ import annotations
 from mparlament.shared.db import Base
 
 # Slice models are imported below as slices are implemented.
+from mparlament.slices.amendments.infrastructure.models import (  # noqa: F401
+    AmendmentModel,
+)
 from mparlament.slices.auth_identity.infrastructure.models import UserModel  # noqa: F401
 from mparlament.slices.resolutions.infrastructure.models import (  # noqa: F401
     ResolutionModel,
@@ -26,6 +29,7 @@ from mparlament.slices.votings.infrastructure.models import (  # noqa: F401
 )
 
 __all__ = [
+    "AmendmentModel",
     "Base",
     "CurrentSessionModel",
     "ResolutionModel",
