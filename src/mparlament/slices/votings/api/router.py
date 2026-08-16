@@ -44,7 +44,9 @@ from mparlament.slices.votings.application.use_cases import (
     ListVotingsUseCase,
     UpdateVotingUseCase,
 )
-from mparlament.slices.votings.domain.ports import NullLinkedItemStatusUpdater
+from mparlament.slices.resolutions.infrastructure.repository import (
+    ResolutionLinkedItemStatusUpdater,
+)
 from mparlament.slices.votings.infrastructure.repository import (
     SqlAlchemyUserDirectory,
     SqlAlchemyVoteRepository,
@@ -57,7 +59,7 @@ _votings = SqlAlchemyVotingRepository()
 _votes = SqlAlchemyVoteRepository()
 _directory = SqlAlchemyUserDirectory()
 _storage = LocalDiskStorage()
-_linked = NullLinkedItemStatusUpdater()  # doc 06/07 will supply the real cascade adapter.
+_linked = ResolutionLinkedItemStatusUpdater()  # doc 06 cascade: archive → resolution status.
 
 _list = ListVotingsUseCase(_votings, _votes, _directory)
 _get = GetVotingUseCase(_votings, _votes, _directory)

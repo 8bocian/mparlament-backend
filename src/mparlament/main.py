@@ -16,6 +16,7 @@ from mparlament.shared.auth import set_user_reader
 from mparlament.shared.config import Settings, get_settings
 from mparlament.slices.auth_identity.api.router import router as auth_identity_router
 from mparlament.slices.auth_identity.infrastructure.reader import SqlAlchemyUserReader
+from mparlament.slices.resolutions.api.router import router as resolutions_router
 from mparlament.slices.sessions.api.router import router as sessions_router
 from mparlament.slices.users.api.router import router as users_router
 from mparlament.slices.votings.api.router import router as votings_router
@@ -26,6 +27,7 @@ SLICE_ROUTERS: list[APIRouter] = [
     users_router,
     sessions_router,
     votings_router,
+    resolutions_router,
 ]
 
 health_router = APIRouter()

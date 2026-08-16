@@ -11,6 +11,10 @@ from mparlament.shared.db import Base
 
 # Slice models are imported below as slices are implemented.
 from mparlament.slices.auth_identity.infrastructure.models import UserModel  # noqa: F401
+from mparlament.slices.resolutions.infrastructure.models import (  # noqa: F401
+    ResolutionModel,
+    ResolutionSignatureModel,
+)
 from mparlament.slices.sessions.infrastructure.models import (  # noqa: F401
     CurrentSessionModel,
     SessionModel,
@@ -24,6 +28,8 @@ from mparlament.slices.votings.infrastructure.models import (  # noqa: F401
 __all__ = [
     "Base",
     "CurrentSessionModel",
+    "ResolutionModel",
+    "ResolutionSignatureModel",
     "SessionModel",
     "SpeakerModel",
     "UserModel",
