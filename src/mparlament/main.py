@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from mparlament.shared.api import register_exception_handlers
 from mparlament.shared.auth import set_user_reader
 from mparlament.shared.config import Settings, get_settings
+from mparlament.slices.amendments.api.router import router as amendments_router
 from mparlament.slices.auth_identity.api.router import router as auth_identity_router
 from mparlament.slices.auth_identity.infrastructure.reader import SqlAlchemyUserReader
 from mparlament.slices.resolutions.api.router import router as resolutions_router
@@ -28,6 +29,7 @@ SLICE_ROUTERS: list[APIRouter] = [
     sessions_router,
     votings_router,
     resolutions_router,
+    amendments_router,
 ]
 
 health_router = APIRouter()
