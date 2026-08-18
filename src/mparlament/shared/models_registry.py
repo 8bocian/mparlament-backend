@@ -14,6 +14,10 @@ from mparlament.slices.amendments.infrastructure.models import (  # noqa: F401
     AmendmentModel,
 )
 from mparlament.slices.auth_identity.infrastructure.models import UserModel  # noqa: F401
+from mparlament.slices.parliamentarians_clubs.infrastructure.models import (  # noqa: F401
+    ClubModel,
+    ParliamentarianModel,
+)
 from mparlament.slices.resolutions.infrastructure.models import (  # noqa: F401
     ResolutionModel,
     ResolutionSignatureModel,
@@ -31,7 +35,9 @@ from mparlament.slices.votings.infrastructure.models import (  # noqa: F401
 __all__ = [
     "AmendmentModel",
     "Base",
+    "ClubModel",
     "CurrentSessionModel",
+    "ParliamentarianModel",
     "ResolutionModel",
     "ResolutionSignatureModel",
     "SessionModel",
