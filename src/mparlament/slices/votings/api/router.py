@@ -27,6 +27,7 @@ from mparlament.shared.auth import (
 )
 from mparlament.shared.db import get_session
 from mparlament.shared.domain import NotFoundError, PermissionDeniedError
+from mparlament.shared.realtime import deferred_event_publisher
 from mparlament.shared.storage import LocalDiskStorage
 from mparlament.slices.votings.application.dtos import (
     ActivateInput,
@@ -90,9 +91,11 @@ _list = ListVotingsUseCase(_votings, _votes, _directory)
 _get = GetVotingUseCase(_votings, _votes, _directory)
 _create = CreateVotingUseCase(_votings, _votes, _directory)
 _update = UpdateVotingUseCase(_votings, _votes, _directory)
-_cast = CastVoteUseCase(_votings, _votes, _directory)
+_cast = CastVoteUseCase(_votings, _votes, _directory, deferred_event_publisher)
 _activate = ActivateVotingUseCase(_votings, _votes, _directory)
-_archive = ArchiveVotingUseCase(_votings, _votes, _directory, _linked)
+_archive = ArchiveVotingUseCase(
+    _votings, _votes, _directory, _linked, deferred_event_publisher
+)
 _attach = AddAttachmentsUseCase(_votings, _votes, _directory, _storage)
 _delete = DeleteVotingUseCase(_votings, _votes, _directory)
 

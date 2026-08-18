@@ -5,8 +5,11 @@ RBAC is enforced in the router (C3), so these stay unit-testable without FastAPI
 cases fan out one vote query per voting — fine at this scale (KISS); a batch load is a later
 optimization if the list grows.
 
-Realtime note (doc 10 / spec §5): ``CastVoteUseCase`` and ``ArchiveVotingUseCase`` are the natural
-emit points for ``voteUpdate:<id>`` — deliberately not implemented now (YAGNI); see TODO markers.
+Realtime note (doc 10 / spec §5): ``CastVoteUseCase`` and ``ArchiveVotingUseCase`` emit
+``voteUpdate:<id>`` at commit time via the injected :class:`EventPublisher` port. The payload is
+derived from the same read projection the REST detail endpoint returns (``build_voting_view``), so
+socket and REST stay in parity (doc 10 "fallback parity"). The default publisher is a no-op, so the
+emit is free until Socket.IO is wired.
 """
 
 from __future__ import annotations
@@ -14,6 +17,7 @@ from __future__ import annotations
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mparlament.shared.domain import ConflictError, NotFoundError
+from mparlament.shared.realtime import EventPublisher, NullEventPublisher
 from mparlament.slices.votings.application.views import build_voting_view
 from mparlament.slices.votings.domain.entities import (
     Voting,
@@ -31,6 +35,18 @@ _NOT_FOUND = "Nie znaleziono głosowania"
 _ALREADY_VOTED = "Użytkownik już oddał głos"
 
 
+# The live-tally fields the FE reads from a ``voteUpdate:<id>`` event — a subset of the REST
+# detail view, so socket and polling stay in parity (doc 10 / spec §5).
+_VOTE_UPDATE_KEYS = (
+    "votedCount",
+    "votesFor",
+    "votesAgainst",
+    "abstained",
+    "votedUsers",
+    "notVotedUsers",
+)
+
+
 class _VotingUseCase:
     """Shared wiring: the three read collaborators used to build a computed view."""
 
@@ -39,10 +55,12 @@ class _VotingUseCase:
         votings: VotingRepository,
         votes: VoteRepository,
         directory: UserDirectory,
+        publisher: EventPublisher | None = None,
     ) -> None:
         self._votings = votings
         self._votes = votes
         self._directory = directory
+        self._publisher = publisher or NullEventPublisher()
 
     async def _view(
         self, session: AsyncSession, voting: Voting, requester_id: int | None
@@ -50,6 +68,12 @@ class _VotingUseCase:
         votes = await self._votes.list_by_voting(session, voting.id)
         users = await self._directory.list_all(session)
         return build_voting_view(voting, votes, users, requester_id)
+
+    async def _emit_vote_update(self, session: AsyncSession, voting: Voting) -> None:
+        """Emit ``voteUpdate:<id>`` with the requester-agnostic live tally (doc 10)."""
+        view = await self._view(session, voting, requester_id=None)
+        payload = {key: view[key] for key in _VOTE_UPDATE_KEYS}
+        await self._publisher.emit(f"voteUpdate:{voting.id}", payload)
 
 
 class ListVotingsUseCase(_VotingUseCase):
@@ -120,7 +144,7 @@ class CastVoteUseCase(_VotingUseCase):
         if await self._votes.get_user_vote(session, voting_id, user_id) is not None:
             raise ConflictError(_ALREADY_VOTED)
         await self._votes.add(session, Vote(votingId=voting_id, userId=user_id, value=value))
-        # TODO(doc 10): emit voteUpdate:<voting_id> here.
+        await self._emit_vote_update(session, voting)
         return {"vote": value, "message": "Głos został zapisany"}
 
 
@@ -155,8 +179,9 @@ class ArchiveVotingUseCase(_VotingUseCase):
         votes: VoteRepository,
         directory: UserDirectory,
         linked_updater: LinkedItemStatusUpdater,
+        publisher: EventPublisher | None = None,
     ) -> None:
-        super().__init__(votings, votes, directory)
+        super().__init__(votings, votes, directory, publisher)
         self._linked = linked_updater
 
     async def execute(
@@ -176,7 +201,7 @@ class ArchiveVotingUseCase(_VotingUseCase):
             await self._linked.update_status(
                 session, voting.linkedItemType, voting.linkedItemId, result
             )
-        # TODO(doc 10): emit voteUpdate:<voting_id> here.
+        await self._emit_vote_update(session, updated)
         view = await self._view(session, updated, requester_id)
         return {"success": True, "voting": view}
 

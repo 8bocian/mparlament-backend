@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from mparlament.shared.auth import User as IdentityUser
 from mparlament.shared.auth import current_user, require_admin_or_marshal
 from mparlament.shared.db import get_session
+from mparlament.shared.realtime import deferred_event_publisher
 from mparlament.slices.sessions.application.dtos import (
     AddSpeakerInput,
     CurrentSessionDTO,
@@ -43,10 +44,10 @@ _session_repo = SqlAlchemySessionRepository()
 _speaker_repo = SqlAlchemySpeakerRepository()
 
 _get_current = GetCurrentSessionUseCase(_current_repo)
-_update_current = UpdateCurrentSessionUseCase(_current_repo)
+_update_current = UpdateCurrentSessionUseCase(_current_repo, deferred_event_publisher)
 _list_sessions = ListSessionsUseCase(_session_repo)
 _list_speakers = ListSpeakersUseCase(_speaker_repo)
-_add_speaker = AddSpeakerUseCase(_speaker_repo)
+_add_speaker = AddSpeakerUseCase(_speaker_repo, deferred_event_publisher)
 
 
 @router.get("/session/current", response_model=CurrentSessionDTO)
