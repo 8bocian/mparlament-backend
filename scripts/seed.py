@@ -18,11 +18,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from mparlament.shared.db import Base, async_session_factory, engine
 import mparlament.shared.models_registry  # noqa: F401  (registers all ORM models)
+from mparlament.slices.amendments.infrastructure.seed import seed_amendments
+from mparlament.slices.auth_identity.infrastructure.seed import seed_users
+from mparlament.slices.parliamentarians_clubs.infrastructure.seed import (
+    seed_parliamentarians_clubs,
+)
+from mparlament.slices.resolutions.infrastructure.seed import seed_resolutions
+from mparlament.slices.sessions.infrastructure.seed import seed_sessions
+from mparlament.slices.votings.infrastructure.seed import seed_votings
 
 SeedHook = Callable[[AsyncSession], Awaitable[None]]
 
-# Slices append their idempotent seed functions here as they are implemented.
-SEED_HOOKS: list[SeedHook] = []
+# Idempotent slice seed hooks, ordered by data dependency: users first (authors/voters), then
+# sessions (referenced by resolutions), the independent parliamentarian registry, then
+# resolutions → amendments (child) → votings (links resolutions/amendments by id).
+SEED_HOOKS: list[SeedHook] = [
+    seed_users,
+    seed_sessions,
+    seed_parliamentarians_clubs,
+    seed_resolutions,
+    seed_amendments,
+    seed_votings,
+]
 
 
 async def _ensure_schema() -> None:
