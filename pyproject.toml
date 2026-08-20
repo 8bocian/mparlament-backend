@@ -31,6 +31,8 @@ httpx = ">=0.28,<1.0"
 anyio = ">=4.0,<5.0"
 ruff = ">=0.8,<1.0"
 mypy = ">=1.13,<2.0"
+# Async Socket.IO client used by scripts/smoke_test.py to exercise the live realtime path.
+aiohttp = ">=3.10,<4.0"
 
 # Async tests run on the anyio pytest plugin (mark with @pytest.mark.anyio);
 # pytest-asyncio is also a declared dev dep for teams that prefer it.
