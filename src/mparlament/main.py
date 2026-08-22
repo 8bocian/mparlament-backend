@@ -72,7 +72,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.cors_origins,
+        allow_origins=settings.allowed_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["Authorization", "Content-Type"],
@@ -95,6 +95,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         StaticFiles(directory=str(settings.upload_dir)),
         name="uploads",
     )
+
+    # Built React SPA (single-container deployment, see DEPLOYMENT.md). Mounted last so
+    # /api and /uploads keep precedence; ``html=True`` serves index.html at "/". The FE uses
+    # HashRouter, so no history fallback is needed. Absent in dev -> nothing is mounted.
+    if settings.static_dir is not None and settings.static_dir.is_dir():
+        app.mount(
+            "/",
+            StaticFiles(directory=str(settings.static_dir), html=True),
+            name="spa",
+        )
 
     return app
 
@@ -131,7 +141,7 @@ def build_socket_server(
     """Build the Socket.IO ``AsyncServer`` with connection + inbound-event handlers (spec §5)."""
     factory = session_factory or async_session_factory
     sio = socketio.AsyncServer(
-        async_mode="asgi", cors_allowed_origins=settings.cors_origins
+        async_mode="asgi", cors_allowed_origins=settings.allowed_origins
     )
 
     @sio.event

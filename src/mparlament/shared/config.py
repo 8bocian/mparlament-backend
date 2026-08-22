@@ -29,8 +29,27 @@ class Settings(BaseSettings):
     upload_dir: Path = Path("uploads")
     cors_origins: list[str] = ["http://localhost:5173"]
 
+    # Origin the app is reachable under once deployed (e.g. https://mparlament.onrender.com).
+    # Engine.IO rejects any origin outside the configured list — including a same-origin one —
+    # so the deployed host must be part of ``allowed_origins`` for Socket.IO to hand-shake.
+    public_origin: str | None = None
+
+    # Directory holding the built React SPA (Vite ``dist``). Mounted at "/" when it exists, so
+    # the single-container deployment serves FE and API from one origin. Unset in dev.
+    static_dir: Path | None = None
+
     host: str = "0.0.0.0"
     port: int = 4000
+
+    @property
+    def allowed_origins(self) -> list[str]:
+        """CORS/Socket.IO origins: the configured list plus ``public_origin``."""
+        origins = list(self.cors_origins)
+        if self.public_origin:
+            origin = self.public_origin.rstrip("/")
+            if origin and origin not in origins:
+                origins.append(origin)
+        return origins
 
 
 @lru_cache
