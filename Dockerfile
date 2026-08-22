@@ -9,7 +9,7 @@
 # carries the same-origin wiring -- upstream main has the socket connection commented out.
 # A branch name works here too, but a cached layer may then hold a stale clone
 # (on Render: "Clear build cache & deploy").
-ARG FRONTEND_SLUG=8bocian/mparlament
+ARG FRONTEND_SLUG=8bocian/mparlament-frontend
 ARG FRONTEND_REF=fee2e0f14320f788f02035f2655abeb3f546cd5e
 
 

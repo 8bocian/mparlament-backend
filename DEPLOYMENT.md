@@ -70,7 +70,7 @@ The frontend is fetched from its own repository at image build time (`FRONTEND_S
 The SPA repository (`Macions/mparlament`) belongs to another member of the team, so the image
 is built from **our own public fork** of it:
 
-- `FRONTEND_SLUG` — `8bocian/mparlament`. The build stage clones it anonymously, so the fork
+- `FRONTEND_SLUG` — `8bocian/mparlament-frontend`. The build stage clones it anonymously, so the fork
   must be **public**; a private one would need a token passed into the build.
 - `FRONTEND_REF` — `fee2e0f` on branch `deploy/same-origin`, the commit holding the same-origin
   wiring: relative `/api` fetches, `SocketProvider` defaulting to same-origin, MSW behind
@@ -80,7 +80,7 @@ is built from **our own public fork** of it:
 One-time setup, from a clone of the SPA repo:
 
 ```bash
-git remote add fork https://github.com/8bocian/mparlament.git
+git remote add fork https://github.com/8bocian/mparlament-frontend.git
 git push fork deploy/same-origin
 ```
 
