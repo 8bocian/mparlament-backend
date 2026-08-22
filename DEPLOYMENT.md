@@ -58,13 +58,31 @@ The frontend is fetched from its own repository at image build time (`FRONTEND_S
 `FRONTEND_REF` build args), so **only this repository has to be connected to Render**.
 
 1. Push this repository to GitHub.
-2. Make sure the frontend ref you are going to build actually contains the same-origin setup
-   (relative `/api` fetches, `SocketProvider` defaulting to same-origin, MSW gated behind
-   `VITE_USE_MOCKS`). Pin `FRONTEND_REF` to that commit SHA.
+2. Point `FRONTEND_SLUG` / `FRONTEND_REF` at a frontend ref that actually contains the
+   same-origin setup — see *Frontend source* below.
 3. In Render: **New → Blueprint**, select the repo, confirm `render.yaml`.
    (Manual alternative: New → Web Service → Docker runtime, health check path `/api/health`.)
 4. Wait for the build, open the service URL. The SPA loads at `/`, the API answers under
    `/api`, and `TEST123` is available from the seed.
+
+### Frontend source
+
+The SPA repository (`Macions/mparlament`) belongs to another member of the team, so the image
+is built from **our own public fork** of it:
+
+- `FRONTEND_SLUG` — `<github-user>/mparlament`. The build stage clones it anonymously, so the
+  fork must be **public**; a private one would need a token passed into the build.
+- `FRONTEND_REF` — the commit SHA (or branch) holding the same-origin wiring: relative `/api`
+  fetches, `SocketProvider` defaulting to same-origin, MSW behind `VITE_USE_MOCKS`. Upstream
+  `main` does *not* have it — its `SocketProvider` is commented out, which yields a working
+  REST app with dead realtime.
+
+To pick up later upstream work, pull it into the fork and re-pin `FRONTEND_REF`:
+
+```bash
+git remote add upstream https://github.com/Macions/mparlament.git   # once
+git fetch upstream && git rebase upstream/main                      # then push and re-pin
+```
 
 ### Free-plan caveats
 

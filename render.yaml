@@ -17,6 +17,11 @@ services:
       # the demo data has to be re-seeded on start.
       - key: MPARLAMENT_SEED_ON_START
         value: "true"
-      # Frontend ref baked into the image (branch, tag or commit SHA).
+      # Frontend source baked into the image. The upstream SPA repo belongs to someone else,
+      # so this points at our own fork; the Docker build clones it anonymously, which means
+      # the fork has to be public. Pin FRONTEND_REF to a SHA so a cached layer cannot serve a
+      # stale clone (branch and tag names work too).
+      - key: FRONTEND_SLUG
+        value: Macions/mparlament # TODO: replace with <your-github-user>/mparlament
       - key: FRONTEND_REF
-        value: main
+        value: main # TODO: replace with the deploy/same-origin commit SHA
