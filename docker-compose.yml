@@ -4,7 +4,7 @@ services:
     build:
       context: .
       args:
-        FRONTEND_SLUG: ${FRONTEND_SLUG:-8bocian/mparlament}
+        FRONTEND_SLUG: ${FRONTEND_SLUG:-8bocian/mparlament-frontend}
         FRONTEND_REF: ${FRONTEND_REF:-fee2e0f14320f788f02035f2655abeb3f546cd5e}
     ports:
       - "4000:4000"
