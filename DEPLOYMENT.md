@@ -70,12 +70,19 @@ The frontend is fetched from its own repository at image build time (`FRONTEND_S
 The SPA repository (`Macions/mparlament`) belongs to another member of the team, so the image
 is built from **our own public fork** of it:
 
-- `FRONTEND_SLUG` — `<github-user>/mparlament`. The build stage clones it anonymously, so the
-  fork must be **public**; a private one would need a token passed into the build.
-- `FRONTEND_REF` — the commit SHA (or branch) holding the same-origin wiring: relative `/api`
-  fetches, `SocketProvider` defaulting to same-origin, MSW behind `VITE_USE_MOCKS`. Upstream
-  `main` does *not* have it — its `SocketProvider` is commented out, which yields a working
-  REST app with dead realtime.
+- `FRONTEND_SLUG` — `8bocian/mparlament`. The build stage clones it anonymously, so the fork
+  must be **public**; a private one would need a token passed into the build.
+- `FRONTEND_REF` — `fee2e0f` on branch `deploy/same-origin`, the commit holding the same-origin
+  wiring: relative `/api` fetches, `SocketProvider` defaulting to same-origin, MSW behind
+  `VITE_USE_MOCKS`. Upstream `main` does *not* have it — its `SocketProvider` is commented out,
+  which yields a working REST app with dead realtime.
+
+One-time setup, from a clone of the SPA repo:
+
+```bash
+git remote add fork https://github.com/8bocian/mparlament.git
+git push fork deploy/same-origin
+```
 
 To pick up later upstream work, pull it into the fork and re-pin `FRONTEND_REF`:
 

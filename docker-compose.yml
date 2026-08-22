@@ -4,8 +4,8 @@ services:
     build:
       context: .
       args:
-        FRONTEND_SLUG: ${FRONTEND_SLUG:-Macions/mparlament}
-        FRONTEND_REF: ${FRONTEND_REF:-main}
+        FRONTEND_SLUG: ${FRONTEND_SLUG:-8bocian/mparlament}
+        FRONTEND_REF: ${FRONTEND_REF:-fee2e0f14320f788f02035f2655abeb3f546cd5e}
     ports:
       - "4000:4000"
     environment:

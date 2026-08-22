@@ -4,11 +4,13 @@
 # frontend's relative fetch("/api/...") calls and its same-origin Socket.IO connection work
 # unchanged in production. See DEPLOYMENT.md.
 
-# The frontend lives in its own repository, so it is fetched by ref at build time.
-# Pin FRONTEND_REF to a commit SHA for reproducible builds; a branch name also works, but a
-# cached layer may then hold a stale clone (on Render: "Clear build cache & deploy").
-ARG FRONTEND_SLUG=Macions/mparlament
-ARG FRONTEND_REF=main
+# The frontend lives in its own repository, so it is fetched by ref at build time. The default
+# is our public fork of the upstream SPA repo (Macions/mparlament), pinned to the commit that
+# carries the same-origin wiring -- upstream main has the socket connection commented out.
+# A branch name works here too, but a cached layer may then hold a stale clone
+# (on Render: "Clear build cache & deploy").
+ARG FRONTEND_SLUG=8bocian/mparlament
+ARG FRONTEND_REF=fee2e0f14320f788f02035f2655abeb3f546cd5e
 
 
 # --- Stage 1: build the SPA --------------------------------------------------------------
