@@ -22,6 +22,6 @@ services:
       # the fork has to be public. Pin FRONTEND_REF to a SHA so a cached layer cannot serve a
       # stale clone (branch and tag names work too).
       - key: FRONTEND_SLUG
-        value: Macions/mparlament # TODO: replace with <your-github-user>/mparlament
+        value: 8bocian/mparlament
       - key: FRONTEND_REF
-        value: main # TODO: replace with the deploy/same-origin commit SHA
+        value: fee2e0f14320f788f02035f2655abeb3f546cd5e # deploy/same-origin
