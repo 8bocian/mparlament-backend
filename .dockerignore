@@ -1,0 +1,33 @@
+# Build context hygiene: only what the image needs (see Dockerfile COPY list).
+.git
+.gitignore
+.github
+.idea
+.claude
+.venv
+venv
+env
+__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+htmlcov
+.coverage*
+
+# Local runtime state -- the container creates its own.
+*.db
+*.sqlite
+*.sqlite3
+uploads/
+data/
+static/
+.env
+.env.*
+
+# Docs and tests are not needed at runtime.
+tests/
+plan_steps/
+*.md
+!README.md

@@ -1,0 +1,21 @@
+# Local run of the production image: docker compose up --build -> http://localhost:4000
+services:
+  app:
+    build:
+      context: .
+      args:
+        FRONTEND_SLUG: ${FRONTEND_SLUG:-Macions/mparlament}
+        FRONTEND_REF: ${FRONTEND_REF:-main}
+    ports:
+      - "4000:4000"
+    environment:
+      MPARLAMENT_PUBLIC_ORIGIN: http://localhost:4000
+      MPARLAMENT_JWT_SECRET: dev-insecure-change-me
+      MPARLAMENT_SEED_ON_START: "true"
+    volumes:
+      - mparlament-data:/app/data
+      - mparlament-uploads:/app/uploads
+
+volumes:
+  mparlament-data:
+  mparlament-uploads:

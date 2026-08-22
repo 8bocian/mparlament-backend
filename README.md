@@ -46,6 +46,12 @@ poetry run alembic upgrade head
 poetry run python scripts/seed.py
 ```
 
+## Deploy
+
+The app ships as a single Docker image serving the API, Socket.IO and the built React SPA from
+one origin (`docker compose up --build` → http://localhost:4000). See `DEPLOYMENT.md` for the
+Render setup and the environment variables.
+
 ## Layout
 
 ```

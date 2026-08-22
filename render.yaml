@@ -1,0 +1,22 @@
+# Render Blueprint: one Docker web service serving the API, Socket.IO and the built SPA.
+# Create it from the Render dashboard: New -> Blueprint -> pick this repository.
+services:
+  - type: web
+    name: mparlament
+    runtime: docker
+    plan: free
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      # Generated once and kept across deploys; tokens stay valid until the value changes.
+      - key: MPARLAMENT_JWT_SECRET
+        generateValue: true
+      # The free plan has no persistent disk: the SQLite DB is recreated on every deploy, so
+      # the demo data has to be re-seeded on start.
+      - key: MPARLAMENT_SEED_ON_START
+        value: "true"
+      # Frontend ref baked into the image (branch, tag or commit SHA).
+      - key: FRONTEND_REF
+        value: main
