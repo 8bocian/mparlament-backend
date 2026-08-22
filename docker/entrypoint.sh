@@ -29,4 +29,10 @@ fi
 echo "==> uvicorn on :${PORT}"
 # Exactly one worker: Socket.IO keeps client state in-process (no Redis adapter), so a second
 # worker would silently drop events for clients attached to the other one.
-exec uvicorn mparlament.main:create_asgi_app     --factory     --host 0.0.0.0     --port "${PORT}"     --workers 1     --proxy-headers     --forwarded-allow-ips="*"
+exec uvicorn mparlament.main:create_asgi_app \
+    --factory \
+    --host 0.0.0.0 \
+    --port "${PORT}" \
+    --workers 1 \
+    --proxy-headers \
+    --forwarded-allow-ips="*"
