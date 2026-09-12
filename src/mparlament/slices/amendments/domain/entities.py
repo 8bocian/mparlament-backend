@@ -75,6 +75,7 @@ class Amendment:
     createdAt: str | None = None  # "YYYY-MM-DD" (C13)
     withdrawnReason: str | None = None
     changes: list = field(default_factory=list)
+    target: dict | None = None
 
     def __post_init__(self) -> None:
         self.changes = [_to_change(c) for c in self.changes]

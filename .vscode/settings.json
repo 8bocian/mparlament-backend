@@ -1,0 +1,13 @@
+﻿{
+    "python.defaultInterpreterPath": ".venv\\Scripts\\python.exe",
+    "python.analysis.extraPaths": [
+        "./src",
+        "./.venv/Lib/site-packages"
+    ],
+    "python.analysis.typeCheckingMode": "basic",
+    "python.analysis.autoImportCompletions": true,
+    "python.analysis.venvPath": ".",
+    "python.venvFolders": [".venv"],
+    "python.terminal.activateEnvironment": true,
+    "python.terminal.activateEnvInCurrentTerminal": true
+}

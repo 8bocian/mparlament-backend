@@ -56,3 +56,4 @@ class SpeakerModel(Base):
     name: Mapped[str] = mapped_column(String, default="")
     club: Mapped[str | None] = mapped_column(String, nullable=True)
     role: Mapped[str | None] = mapped_column(String, nullable=True)
+    status: Mapped[str] = mapped_column(String, default="waiting")

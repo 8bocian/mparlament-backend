@@ -16,9 +16,13 @@ from __future__ import annotations
 from dataclasses import asdict
 
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from mparlament.shared.domain import NotFoundError
 from mparlament.shared.realtime import EventPublisher, NullEventPublisher
+from mparlament.shared.domain import NotFoundError
+
+_NOT_FOUND = "Nie znaleziono zasobu"
 from mparlament.slices.sessions.domain.entities import (
+    SPEAKER_STATUSES,
     CurrentSession,
     Session,
     Speaker,
@@ -113,6 +117,62 @@ class AddSpeakerUseCase:
         # no ``time`` (that lives on the live session's CurrentSpeaker), so it is null here.
         await self._publisher.emit(
             "speakerUpdated",
-            {"name": speaker.name, "club": speaker.club, "role": speaker.role, "time": None},
+            {
+                "name": speaker.name,
+                "club": speaker.club,
+                "role": speaker.role,
+                "time": None,
+            },
         )
         return speaker
+
+
+class UpdateSpeakerUseCase:
+    """Partial update of a speaker (#41). 404 when unknown."""
+
+    def __init__(self, repo: SpeakerRepository) -> None:
+        self._repo = repo
+
+    async def execute(
+        self,
+        session: AsyncSession,
+        speaker_id: int,
+        name: str | None,
+        club: str | None,
+        role: str | None,
+        status: str | None,
+    ) -> Speaker:
+        speaker = await self._repo.get_by_id(session, speaker_id)
+        if speaker is None:
+            raise NotFoundError("Nie znaleziono mówcy")
+        speaker.update(name=name, club=club, role=role, status=status)
+        return await self._repo.update(session, speaker)
+
+
+class DeleteSpeakerUseCase:
+    """Delete a speaker (#41). 404 when unknown."""
+
+    def __init__(self, repo: SpeakerRepository) -> None:
+        self._repo = repo
+
+    async def execute(self, session: AsyncSession, speaker_id: int) -> dict:
+        deleted = await self._repo.delete(session, speaker_id)
+        if not deleted:
+            raise NotFoundError("Nie znaleziono mówcy")
+        return {"success": True}
+
+
+class SetSpeakerStatusUseCase:
+    """Set a speaker's status (active/waiting/done)."""
+
+    def __init__(self, repo: SpeakerRepository) -> None:
+        self._repo = repo
+
+    async def execute(
+        self, session: AsyncSession, speaker_id: int, status: str
+    ) -> Speaker:
+        speaker = await self._repo.get_by_id(session, speaker_id)
+        if speaker is None:
+            raise NotFoundError("Nie znaleziono mówcy")
+        speaker.update(status=status)
+        return await self._repo.update(session, speaker)

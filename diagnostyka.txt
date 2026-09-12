@@ -1,0 +1,351 @@
+﻿
+
+═══════════════════════════════════════════════════════════════
+  1. SZUKAM PROBLEMÓW W PLIKACH
+═══════════════════════════════════════════════════════════════
+
+───── SZUKAM 'DeleteResolutionUseCase' w src\mparlament\slices\sessions\application\use_cases.py ─────
+
+class DeleteResolutionUseCase(_ResolutionUseCase):
+
+
+
+───── SZUKAM '_ResolutionUseCase' w src\mparlament\slices\sessions\application\use_cases.py ─────
+
+class DeleteResolutionUseCase(_ResolutionUseCase):
+
+
+
+───── SZUKAM 'ResolutionModel' w src\mparlament\slices\sessions\infrastructure\repository.py ─────
+
+        row = await session.get(ResolutionModel, resolution_id)
+
+
+
+───── SZUKAM 'VotingModel' w src\mparlament\slices\sessions\infrastructure\repository.py ─────
+(brak wystąpień)
+
+───── SZUKAM 'list_user_votes_for_amendments' w src\mparlament\slices\sessions\infrastructure\repository.py ─────
+(brak wystąpień)
+
+───── SZUKAM 'list_user_votes_for_amendments' w src\mparlament\slices\votings\infrastructure\repository.py ─────
+
+    async def list_user_votes_for_amendments(
+
+
+
+───── SZUKAM 'DeleteResolutionUseCase' w src\mparlament\slices\resolutions\application\use_cases.py ─────
+
+class DeleteResolutionUseCase(_ResolutionUseCase):
+
+
+
+───── SZUKAM 'target' w src\mparlament\slices\amendments\domain\entities.py ─────
+
+    target: dict | None = None
+
+
+
+
+═══════════════════════════════════════════════════════════════
+  2. FRAGMENTY PLIKÓW (okolice podejrzanych linii)
+═══════════════════════════════════════════════════════════════
+
+───── src\mparlament\slices\sessions\application\use_cases.py ─────
+    async def execute(
+        self, session: AsyncSession, speaker_id: int, status: str
+    ) -> Speaker:
+        speaker = await self._repo.get_by_id(session, speaker_id)
+        if speaker is None:
+            raise NotFoundError("Nie znaleziono mĂłwcy")
+        speaker.update(status=status)
+        return await self._repo.update(session, speaker)
+
+
+class DeleteResolutionUseCase(_ResolutionUseCase):
+    """Delete a resolution (#22b). DB-level cascade removes signatures + amendments."""
+
+    async def execute(self, session: AsyncSession, resolution_id: int) -> dict:
+        resolution = await self._resolutions.get_by_id(session, resolution_id)
+        if resolution is None:
+            raise NotFoundError(_NOT_FOUND)
+        await self._resolutions.delete(session, resolution_id)
+        return {"success": True, "message": "UchwaĹ‚a zostaĹ‚a usuniÄ™ta"}
+
+───── src\mparlament\slices\sessions\infrastructure\repository.py ─────
+
+    async def update(self, session: AsyncSession, speaker: Speaker) -> Speaker:
+        row = await session.get(SpeakerModel, speaker.id)
+        if row is None:
+            raise KeyError(speaker.id)
+        row.name = speaker.name
+        row.club = speaker.club
+        row.role = speaker.role
+        row.status = speaker.status
+        await session.flush()
+        return to_speaker(row)
+
+    async def delete(self, session: AsyncSession, resolution_id: int) -> bool:
+        row = await session.get(ResolutionModel, resolution_id)
+        if row is None:
+            return False
+        await session.delete(row)
+        await session.flush()
+        return True
+
+    async def delete(self, session: AsyncSession, speaker_id: int) -> bool:
+        row = await session.get(SpeakerModel, speaker_id)
+        if row is None:
+            return False
+        await session.delete(row)
+        await session.flush()
+        return True
+
+───── src\mparlament\slices\amendments\domain\entities.py ─────
+        after=data.get("after", "") or "",
+        type=data.get("type"),
+    )
+
+
+# --- entity ----------------------------------------------------------------
+
+
+@dataclass
+class Amendment:
+    """The poprawka aggregate (spec Â§2 Amendment)."""
+
+    id: int | None = None
+    resolutionId: int | None = None
+    author: str = ""
+    authorId: int | None = None
+    club: str | None = None
+    content: str = ""
+    status: str = PENDING  # pending|accepted|rejected|withdrawn
+    createdAt: str | None = None  # "YYYY-MM-DD" (C13)
+    withdrawnReason: str | None = None
+    changes: list = field(default_factory=list)
+    target: dict | None = None
+
+    def __post_init__(self) -> None:
+        self.changes = [_to_change(c) for c in self.changes]
+
+    def is_author(self, user_id: int | None) -> bool:
+        return user_id is not None and self.authorId == user_id
+
+    def withdraw(self, actor_id: int | None, reason: str | None) -> None:
+        """Withdraw this amendment (spec #28): author-only, once.
+
+        Raises ``PermissionDeniedError`` (403) when ``actor_id`` is not the author, and
+        ``ConflictError`` (400) when the amendment is already withdrawn. On success sets
+
+───── src\mparlament\slices\amendments\infrastructure\models.py ─────
+"""SQLAlchemy model for the amendments slice.
+
+``amendments`` â€” scalar columns plus a JSON ``changes`` column (document-shaped article diffs;
+matches the FE's reads/writes and avoids over-normalizing changes â€” KISS/YAGNI). ``resolution_id``
+is a FK to ``resolutions.id`` (cascade delete: an amendment cannot outlive its parent uchwaĹ‚a).
+``created_at`` is a date string ``YYYY-MM-DD`` (C13).
+
+Registered on ``Base.metadata`` via ``shared.models_registry`` so create_all/Alembic see it.
+"""
+
+from __future__ import annotations
+
+from sqlalchemy import JSON, ForeignKey, Integer, String
+from sqlalchemy.orm import Mapped, mapped_column
+
+from mparlament.shared.db import Base
+
+
+class AmendmentModel(Base):
+    __tablename__ = "amendments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    resolution_id: Mapped[int] = mapped_column(
+        ForeignKey("resolutions.id", ondelete="CASCADE"), index=True
+    )
+    author: Mapped[str] = mapped_column(String, default="")
+    author_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    club: Mapped[str | None] = mapped_column(String, nullable=True)
+    content: Mapped[str] = mapped_column(String, default="")
+    status: Mapped[str] = mapped_column(String, default="pending")
+    created_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    withdrawn_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    changes: Mapped[list] = mapped_column(JSON, default=list)
+    target: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+───── src\mparlament\slices\amendments\infrastructure\mappers.py ─────
+"""Mappers between the amendments ORM row and the framework-free domain object.
+
+``changes`` round-trip through the frozen ``Change`` value object; ``apply_amendment`` writes them
+back as plain JSON (``dataclasses.asdict``) so SQLite's ``JSON`` type can store them.
+"""
+
+from __future__ import annotations
+
+from dataclasses import asdict
+
+from mparlament.slices.amendments.domain.entities import Amendment
+from mparlament.slices.amendments.infrastructure.models import AmendmentModel
+
+
+def to_amendment(row: AmendmentModel) -> Amendment:
+    return Amendment(
+        id=row.id,
+        resolutionId=row.resolution_id,
+        author=row.author,
+        authorId=row.author_id,
+        club=row.club,
+        content=row.content,
+        status=row.status,
+        createdAt=row.created_at,
+        withdrawnReason=row.withdrawn_reason,
+        changes=list(row.changes or []),
+        target=dict(row.target) if row.target else None,
+    )
+
+
+def apply_amendment(row: AmendmentModel, amendment: Amendment) -> None:
+    """Copy a domain ``Amendment`` onto an ORM row (``changes`` as plain JSON)."""
+    row.resolution_id = amendment.resolutionId
+    row.author = amendment.author
+    row.author_id = amendment.authorId
+    row.club = amendment.club
+    row.content = amendment.content
+    row.status = amendment.status
+    row.created_at = amendment.createdAt
+    row.withdrawn_reason = amendment.withdrawnReason
+    row.changes = [asdict(c) for c in amendment.changes]
+    row.target = dict(amendment.target) if amendment.target else None
+
+───── src\mparlament\slices\amendments\application\views.py ─────
+"""Read-time projection of an ``Amendment`` into the FE-facing shape (spec Â§2, Â§4, C10).
+
+``amendment_dict`` is the bare ``Amendment`` object the FE reads everywhere (list, detail, create
+and withdraw responses). ``changes`` is emitted as plain dicts; a ``Change`` with ``type=None``
+still carries the key (the FE tolerates a null ``type``).
+"""
+
+from __future__ import annotations
+
+from dataclasses import asdict
+
+from mparlament.slices.amendments.domain.entities import Amendment
+
+
+def amendment_dict(amendment: Amendment) -> dict:
+    """The ``Amendment`` object the FE reads (spec Â§2 Amendment), ``changes`` included."""
+    return {
+        "id": amendment.id,
+        "resolutionId": amendment.resolutionId,
+        "author": amendment.author,
+        "authorId": amendment.authorId,
+        "club": amendment.club,
+        "content": amendment.content,
+        "status": amendment.status,
+        "createdAt": amendment.createdAt,
+        "withdrawnReason": amendment.withdrawnReason,
+        "target": amendment.target,
+        "changes": [asdict(c) for c in amendment.changes],
+    }
+
+
+═══════════════════════════════════════════════════════════════
+  3. IMPORTY W KLUCZOWYCH PLIKACH
+═══════════════════════════════════════════════════════════════
+
+───── SZUKAM '^from|^import' w src\mparlament\slices\resolutions\application\use_cases.py ─────
+
+from __future__ import annotations
+import datetime as dt
+from sqlalchemy.ext.asyncio import AsyncSession
+from mparlament.shared.domain import ConflictError, NotFoundError
+from mparlament.slices.resolutions.application.dtos import ResolutionCreateData
+from mparlament.slices.resolutions.application.views import (
+from mparlament.slices.resolutions.domain.entities import (
+from mparlament.slices.resolutions.domain.ports import (
+from mparlament.slices.resolutions.domain.services import resolve_resolution
+
+
+
+───── SZUKAM '^from|^import' w src\mparlament\slices\resolutions\api\router.py ─────
+
+from __future__ import annotations
+from fastapi import APIRouter, Depends, Request, status
+from sqlalchemy.ext.asyncio import AsyncSession
+from mparlament.shared.auth import User as IdentityUser
+from mparlament.shared.auth import (
+from mparlament.shared.db import get_session
+from mparlament.shared.storage import LocalDiskStorage
+from mparlament.slices.resolutions.application.use_cases import (
+from mparlament.slices.resolutions.infrastructure.repository import (
+
+
+
+───── SZUKAM '^from|^import' w src\mparlament\slices\sessions\api\router.py ─────
+
+from __future__ import annotations
+from fastapi import APIRouter, Depends, status
+from sqlalchemy.ext.asyncio import AsyncSession
+from mparlament.shared.auth import User as IdentityUser
+from mparlament.shared.auth import current_user, require_admin_or_marshal
+from mparlament.shared.db import get_session
+from mparlament.shared.domain import NotFoundError
+from mparlament.shared.realtime import deferred_event_publisher
+from mparlament.slices.sessions.application.dtos import (
+from mparlament.slices.sessions.application.use_cases import (
+from mparlament.slices.sessions.infrastructure.repository import (
+
+
+
+───── SZUKAM '^from|^import' w src\mparlament\slices\votings\application\use_cases.py ─────
+
+from __future__ import annotations
+from sqlalchemy.ext.asyncio import AsyncSession
+from mparlament.shared.domain import ConflictError, NotFoundError
+from mparlament.shared.realtime import EventPublisher, NullEventPublisher
+from mparlament.slices.votings.application.views import build_voting_view
+from mparlament.slices.votings.domain.entities import (
+from mparlament.slices.votings.domain.ports import (
+
+
+
+
+═══════════════════════════════════════════════════════════════
+  4. ENDPOINTY (szukam @router)
+═══════════════════════════════════════════════════════════════
+
+───── SZUKAM '@router' w src\mparlament\slices\sessions\api\router.py ─────
+
+@router.get("/session/current", response_model=CurrentSessionDTO)
+@router.get("/sessions/current", response_model=CurrentSessionDTO)
+@router.put("/session/current", response_model=CurrentSessionDTO)
+@router.get("/sessions", response_model=list[SessionListDTO])
+@router.get("/speakers", response_model=list[SpeakerDTO])
+@router.post(
+@router.put("/speakers/{speaker_id}", response_model=SpeakerDTO)
+@router.put("/speakers", response_model=SpeakerDTO)
+@router.patch("/speakers/{speaker_id}/status", response_model=SpeakerDTO)
+@router.delete("/speakers/{speaker_id}")
+
+
+
+───── SZUKAM '@router' w src\mparlament\slices\resolutions\api\router.py ─────
+
+@router.get("/resolutions")
+@router.post("/resolutions", status_code=status.HTTP_201_CREATED)
+@router.get("/resolutions/session/{session_id}")
+@router.post("/resolutions/{resolution_id}/sign")
+@router.delete("/resolutions/{resolution_id}/sign")
+@router.delete("/resolutions/{resolution_id}")
+@router.get("/resolutions/{param}")
+
+
+
+
+═══════════════════════════════════════════════════════════════
+  5. KONIEC
+═══════════════════════════════════════════════════════════════
+
+Plik wygenerowany: 09/12/2026 19:10:36
+Katalog: A:\mparl backend\mparlament-backend

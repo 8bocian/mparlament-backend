@@ -30,6 +30,16 @@ class ConflictError(DomainError):
 
     status_code = 400
 
+    def __init__(self, message: str, payload: dict | None = None) -> None:
+        super().__init__(message)
+        self.payload = payload or {}
+
+
+class AmendmentConflictError(ConflictError):
+    """Conflict between amendments (vote-time guard) -> 409."""
+
+    status_code = 409
+
 
 class PermissionDeniedError(DomainError):
     """Authenticated but not allowed -> 403."""

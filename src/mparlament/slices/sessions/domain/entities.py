@@ -18,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 
 SCHEDULE_STATUSES = frozenset({"done", "active", "waiting", "crossed", "disabled"})
+SPEAKER_STATUSES = frozenset({"active", "waiting", "done"})
 
 
 @dataclass(frozen=True)
@@ -70,7 +71,9 @@ def _to_point(value: object) -> AgendaPoint | None:
 def _to_schedule(value: object) -> list[ScheduleItem]:
     items: list[ScheduleItem] = []
     for raw in value or []:  # type: ignore[union-attr]
-        items.append(raw if isinstance(raw, ScheduleItem) else ScheduleItem(**dict(raw)))
+        items.append(
+            raw if isinstance(raw, ScheduleItem) else ScheduleItem(**dict(raw))
+        )
     return items
 
 
@@ -132,9 +135,31 @@ class Session:
 
 @dataclass
 class Speaker:
-    """Speaker registry entity (#39/#40). ``id`` is assigned on persistence."""
+    """Speaker registry entity (#39/#40/#41). ``id`` is assigned on persistence.
+
+    ``status`` tracks the live speaking state (``active`` / ``waiting`` / ``done``) — the
+    FE reads it to render the speaker-history list (● / ○ / ✓). Default is ``waiting``.
+    """
 
     id: int | None
     name: str
     club: str | None = None
     role: str | None = None
+    status: str = "waiting"
+
+    def update(
+        self,
+        name: str | None = None,
+        club: str | None = None,
+        role: str | None = None,
+        status: str | None = None,
+    ) -> None:
+        """Partial update (#41). Only non-None args are applied."""
+        if name is not None:
+            self.name = name
+        if club is not None:
+            self.club = club
+        if role is not None:
+            self.role = role
+        if status is not None:
+            self.status = status

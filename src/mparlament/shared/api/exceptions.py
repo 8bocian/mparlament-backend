@@ -15,14 +15,20 @@ from mparlament.shared.domain import DomainError
 
 
 async def _domain_error_handler(_request: Request, exc: DomainError) -> JSONResponse:
-    return JSONResponse(status_code=exc.status_code, content={"message": exc.message})
+    body: dict = {"message": exc.message}
+    payload = getattr(exc, "payload", None)
+    if payload:
+        body.update(payload)
+    return JSONResponse(status_code=exc.status_code, content=body)
 
 
 async def _validation_error_handler(
     _request: Request, exc: RequestValidationError
 ) -> JSONResponse:
     errors = exc.errors()
-    message = errors[0].get("msg", "Nieprawidłowe dane") if errors else "Nieprawidłowe dane"
+    message = (
+        errors[0].get("msg", "Nieprawidłowe dane") if errors else "Nieprawidłowe dane"
+    )
     return JSONResponse(status_code=422, content={"message": message})
 
 

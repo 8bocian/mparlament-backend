@@ -132,7 +132,12 @@ class UpdateVotingUseCase(_VotingUseCase):
 
 
 class CastVoteUseCase(_VotingUseCase):
-    """Cast a single vote (spec #12): normalize (C4), enforce single-vote, save."""
+    """Cast a single vote (spec #12): normalize (C4), enforce single-vote, save.
+
+    Conflict guard: when the voting is linked to an amendment and the vote is ``for``,
+    we check whether the user has already voted ``for`` on a conflicting amendment of
+    the same resolution (port of the FE's ``detectAllConflicts`` guard).
+    """
 
     async def execute(
         self, session: AsyncSession, voting_id: int, user_id: int, raw_vote: object
@@ -143,9 +148,69 @@ class CastVoteUseCase(_VotingUseCase):
         value = normalize_vote(raw_vote)
         if await self._votes.get_user_vote(session, voting_id, user_id) is not None:
             raise ConflictError(_ALREADY_VOTED)
-        await self._votes.add(session, Vote(votingId=voting_id, userId=user_id, value=value))
+
+        # Conflict guard (spec: only amendments + only "for").
+        if (
+            value == "for"
+            and voting.linkedItemType == "amendment"
+            and voting.linkedItemId
+        ):
+            conflict = await self._check_amendment_conflict(
+                session, int(voting.linkedItemId), user_id
+            )
+            if conflict is not None:
+                from mparlament.shared.domain import AmendmentConflictError
+
+                raise AmendmentConflictError(conflict["message"], payload=conflict)
+
+        await self._votes.add(
+            session, Vote(votingId=voting_id, userId=user_id, value=value)
+        )
         await self._emit_vote_update(session, voting)
         return {"vote": value, "message": "Głos został zapisany"}
+
+    async def _check_amendment_conflict(
+        self, session: AsyncSession, amendment_id: int, user_id: int
+    ) -> dict | None:
+        """Returns a conflict payload when the user's prior votes conflict; else ``None``."""
+        from mparlament.slices.amendments.domain.services import detect_all_conflicts
+        from mparlament.slices.amendments.infrastructure.repository import (
+            SqlAlchemyAmendmentRepository,
+        )
+
+        amendments_repo = SqlAlchemyAmendmentRepository()
+        current = await amendments_repo.get_by_id(session, amendment_id)
+        if current is None or current.resolutionId is None:
+            return None
+
+        siblings = await amendments_repo.list_by_resolution(
+            session, current.resolutionId
+        )
+        with_conflicts = detect_all_conflicts(siblings)
+        current_view = next(
+            (a for a in with_conflicts if a["id"] == amendment_id), None
+        )
+        if not current_view or not current_view.get("conflictsWith"):
+            return None
+
+        conflicting_ids = set(current_view["conflictsWith"])
+        prior_votes = await self._votes.list_user_votes_for_amendments(
+            session, user_id, list(conflicting_ids)
+        )
+        has_conflict = any(v.value == "for" for v in prior_votes)
+        if not has_conflict:
+            return None
+
+        return {
+            "success": False,
+            "message": (
+                "Nie możesz głosować ZA tą poprawką, ponieważ jest sprzeczna "
+                "z inną poprawką, którą poparłeś."
+            ),
+            "conflictsWith": current_view["conflictsWith"],
+            "conflictReason": current_view.get("conflictReason"),
+            "conflictFragment": current_view.get("conflictFragment"),
+        }
 
 
 class ActivateVotingUseCase(_VotingUseCase):
@@ -167,7 +232,11 @@ class ActivateVotingUseCase(_VotingUseCase):
         voting.activate(startTime, endTime, duration, delay)
         updated = await self._votings.update(session, voting)
         view = await self._view(session, updated, requester_id)
-        return {"success": True, "message": "Głosowanie zostało aktywowane", "voting": view}
+        return {
+            "success": True,
+            "message": "Głosowanie zostało aktywowane",
+            "voting": view,
+        }
 
 
 class ArchiveVotingUseCase(_VotingUseCase):
@@ -222,7 +291,10 @@ class AddAttachmentsUseCase(_VotingUseCase):
         self._max_bytes = max_bytes
 
     async def execute(
-        self, session: AsyncSession, voting_id: int, files: list[tuple[str, bytes, str | None]]
+        self,
+        session: AsyncSession,
+        voting_id: int,
+        files: list[tuple[str, bytes, str | None]],
     ) -> dict:
         from mparlament.shared.domain import ValidationError
         from mparlament.slices.votings.domain.entities import Attachment

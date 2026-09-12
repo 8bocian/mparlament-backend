@@ -26,7 +26,10 @@ from mparlament.slices.amendments.application.views import amendment_dict
 from mparlament.slices.amendments.domain.entities import Amendment
 from mparlament.slices.amendments.domain.ports import AmendmentRepository
 from mparlament.slices.resolutions.domain.entities import Resolution
-from mparlament.slices.resolutions.domain.ports import ResolutionRepository, SessionLookup
+from mparlament.slices.resolutions.domain.ports import (
+    ResolutionRepository,
+    SessionLookup,
+)
 from mparlament.slices.resolutions.domain.services import resolve_resolution
 
 _AMENDMENT_NOT_FOUND = "Nie znaleziono poprawki"
@@ -126,32 +129,38 @@ class GetAmendmentUnderResolutionUseCase(_AmendmentUseCase):
 
 
 class ListAmendmentsUseCase(_AmendmentUseCase):
-    """All amendments as a **bare array** (spec #26, C10)."""
+    """All amendments as a **bare array** with conflicts computed (spec #26, C10)."""
 
     async def execute(self, session: AsyncSession) -> list[dict]:
+        from mparlament.slices.amendments.domain.services import detect_all_conflicts
+
         amendments = await self._amendments.list_all(session)
-        return [amendment_dict(a) for a in amendments]
+        return detect_all_conflicts(amendments)
 
 
 class GetAmendmentUseCase(_AmendmentUseCase):
-    """One amendment wrapped for the voting linked-item read (spec #27, C10).
-
-    200 → ``{data: {...amendment, resolution:{id,title,slug}}}``. The nested ``resolution`` block is
-    omitted-as-``None`` when the parent no longer exists (loose coupling). 404 when the amendment
-    itself is missing.
-    """
+    """One amendment wrapped for the voting linked-item read (spec #27, C10)."""
 
     async def execute(self, session: AsyncSession, amendment_id: int) -> dict:
+        from mparlament.slices.amendments.domain.services import detect_all_conflicts
+
         amendment = await self._amendments.get_by_id(session, amendment_id)
         if amendment is None:
             raise NotFoundError(_AMENDMENT_NOT_FOUND)
+        siblings = await self._amendments.list_by_resolution(
+            session, amendment.resolutionId
+        )
+        with_conflicts = detect_all_conflicts(siblings)
+        result = next((a for a in with_conflicts if a["id"] == amendment_id), None)
+        if result is None:
+            raise NotFoundError(_AMENDMENT_NOT_FOUND)
+
         resolution = None
         if amendment.resolutionId is not None:
             resolution = await self._resolutions.get_by_id(
                 session, amendment.resolutionId
             )
-        data = amendment_dict(amendment)
-        data["resolution"] = (
+        result["resolution"] = (
             {
                 "id": resolution.id,
                 "title": resolution.title,
@@ -160,7 +169,7 @@ class GetAmendmentUseCase(_AmendmentUseCase):
             if resolution
             else None
         )
-        return {"data": data}
+        return {"data": result}
 
 
 class WithdrawAmendmentUseCase(_AmendmentUseCase):

@@ -49,7 +49,9 @@ def apply_current(row: CurrentSessionModel, current: CurrentSession) -> None:
     row.start_time = current.startTime
     row.end = current.end
     row.end_time = current.endTime
-    row.current_speaker = asdict(current.currentSpeaker) if current.currentSpeaker else None
+    row.current_speaker = (
+        asdict(current.currentSpeaker) if current.currentSpeaker else None
+    )
     row.current_point = asdict(current.currentPoint) if current.currentPoint else None
     row.schedule = [asdict(item) for item in current.schedule]
     row.zo_content = current.zoContent
@@ -70,4 +72,10 @@ def to_session(row: SessionModel) -> Session:
 
 
 def to_speaker(row: SpeakerModel) -> Speaker:
-    return Speaker(id=row.id, name=row.name, club=row.club, role=row.role)
+    return Speaker(
+        id=row.id,
+        name=row.name,
+        club=row.club,
+        role=row.role,
+        status=row.status or "waiting",
+    )

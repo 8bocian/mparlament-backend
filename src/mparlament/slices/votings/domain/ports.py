@@ -52,6 +52,10 @@ class VoteRepository(Protocol):
         self, session: AsyncSession, voting_id: int
     ) -> list[Vote]: ...
 
+    async def list_user_votes_for_amendments(
+        self, session: AsyncSession, user_id: int, amendment_ids: list[int]
+    ) -> list[Vote]: ...
+
 
 @runtime_checkable
 class UserDirectory(Protocol):

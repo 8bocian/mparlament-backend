@@ -17,11 +17,16 @@ from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mparlament.shared.auth import User as IdentityUser
-from mparlament.shared.auth import current_user, optional_user
+from mparlament.shared.auth import (
+    current_user,
+    optional_user,
+    require_admin_or_marshal,
+)
 from mparlament.shared.db import get_session
 from mparlament.shared.storage import LocalDiskStorage
 from mparlament.slices.resolutions.application.use_cases import (
     CreateResolutionUseCase,
+    DeleteResolutionUseCase,
     GetResolutionUseCase,
     ListResolutionsUseCase,
     ListSessionResolutionsUseCase,
@@ -50,6 +55,7 @@ _create = CreateResolutionUseCase(
 )
 _sign = SignResolutionUseCase(_resolutions, _signatures, _directory, _sessions)
 _unsign = UnsignResolutionUseCase(_resolutions, _signatures, _directory, _sessions)
+_delete = DeleteResolutionUseCase(_resolutions, _signatures, _directory, _sessions)
 _session_list = ListSessionResolutionsUseCase(
     _resolutions, _signatures, _directory, _sessions
 )
@@ -103,6 +109,15 @@ async def unsign_resolution(
     session: AsyncSession = Depends(get_session),
 ) -> dict:
     return await _unsign.execute(session, resolution_id, user.id)
+
+
+@router.delete("/resolutions/{resolution_id}")
+async def delete_resolution(
+    resolution_id: int,
+    user: IdentityUser = Depends(require_admin_or_marshal),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    return await _delete.execute(session, resolution_id)
 
 
 @router.get("/resolutions/{param}")

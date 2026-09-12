@@ -1,0 +1,2200 @@
+﻿
+═══════════════════════════════════════════════════════════════
+FILE: src\mparlament\slices\sessions\api\router.py
+═══════════════════════════════════════════════════════════════
+
+"""Sessions-slice routes (spec Â§4 #4-#7, #39/#40) â€” mounted under ``/api`` by the app factory.
+
+- #4 GET  /session/current   (Bearer)  â” two routes, one handler â€” identical C6 superset object
+- #6 GET  /sessions/current  (Bearer)  â”
+- #5 PUT  /session/current   (Bearer, admin/marshal) â€” partial merge, returns full object
+- #7 GET  /sessions          (public)  â†’ bare array [{id, name, date, city}] (C10)
+- #39 GET /speakers          (Bearer)  â†’ bare array [{name, club, role}] (C10)
+- #40 POST /speakers         (Bearer, admin/marshal) â†’ 201 {id, name, club, role}
+"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from mparlament.shared.auth import User as IdentityUser
+from mparlament.shared.auth import current_user, require_admin_or_marshal
+from mparlament.shared.db import get_session
+from mparlament.shared.realtime import deferred_event_publisher
+from mparlament.slices.sessions.application.dtos import (
+    AddSpeakerInput,
+    CurrentSessionDTO,
+    SessionListDTO,
+    SpeakerDTO,
+    UpdateCurrentSessionInput,
+)
+from mparlament.slices.sessions.application.use_cases import (
+    AddSpeakerUseCase,
+    GetCurrentSessionUseCase,
+    ListSessionsUseCase,
+    ListSpeakersUseCase,
+    UpdateCurrentSessionUseCase,
+)
+from mparlament.slices.sessions.infrastructure.repository import (
+    SqlAlchemyCurrentSessionRepository,
+    SqlAlchemySessionRepository,
+    SqlAlchemySpeakerRepository,
+)
+
+router = APIRouter(tags=["sessions"])
+
+_current_repo = SqlAlchemyCurrentSessionRepository()
+_session_repo = SqlAlchemySessionRepository()
+_speaker_repo = SqlAlchemySpeakerRepository()
+
+_get_current = GetCurrentSessionUseCase(_current_repo)
+_update_current = UpdateCurrentSessionUseCase(_current_repo, deferred_event_publisher)
+_list_sessions = ListSessionsUseCase(_session_repo)
+_list_speakers = ListSpeakersUseCase(_speaker_repo)
+_add_speaker = AddSpeakerUseCase(_speaker_repo, deferred_event_publisher)
+
+
+@router.get("/session/current", response_model=CurrentSessionDTO)
+@router.get("/sessions/current", response_model=CurrentSessionDTO)
+async def get_current_session(
+    _: IdentityUser = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> CurrentSessionDTO:
+    current = await _get_current.execute(session)
+    return CurrentSessionDTO.model_validate(current)
+
+
+@router.put("/session/current", response_model=CurrentSessionDTO)
+async def update_current_session(
+    payload: UpdateCurrentSessionInput,
+    _: IdentityUser = Depends(require_admin_or_marshal),
+    session: AsyncSession = Depends(get_session),
+) -> CurrentSessionDTO:
+    patch = payload.model_dump(exclude_unset=True)
+    updated = await _update_current.execute(session, patch)
+    return CurrentSessionDTO.model_validate(updated)
+
+
+@router.get("/sessions", response_model=list[SessionListDTO])
+async def list_sessions(
+    session: AsyncSession = Depends(get_session),
+) -> list[SessionListDTO]:
+    sessions = await _list_sessions.execute(session)
+    return [SessionListDTO.model_validate(s) for s in sessions]
+
+
+@router.get("/speakers", response_model=list[SpeakerDTO])
+async def list_speakers(
+    _: IdentityUser = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> list[SpeakerDTO]:
+    speakers = await _list_speakers.execute(session)
+    return [SpeakerDTO.model_validate(s) for s in speakers]
+
+
+@router.post(
+    "/speakers", response_model=SpeakerDTO, status_code=status.HTTP_201_CREATED
+)
+async def add_speaker(
+    payload: AddSpeakerInput,
+    _: IdentityUser = Depends(require_admin_or_marshal),
+    session: AsyncSession = Depends(get_session),
+) -> SpeakerDTO:
+    speaker = await _add_speaker.execute(
+        session, payload.name, payload.club, payload.role
+    )
+    return SpeakerDTO.model_validate(speaker)
+
+
+
+═══════════════════════════════════════════════════════════════
+FILE: src\mparlament\slices\sessions\application\use_cases.py
+═══════════════════════════════════════════════════════════════
+
+"""Application use cases for the sessions slice (doc 04).
+
+Read/write orchestration over the domain ports; DTO mapping happens in the API layer. RBAC is
+enforced in the router (C3) via ``require_admin_or_marshal`` â€” the write use cases stay purely
+about state so they remain unit-testable without FastAPI.
+
+Realtime note (doc 10 / spec Â§5): ``UpdateCurrentSessionUseCase`` and ``AddSpeakerUseCase`` emit
+``scheduleUpdated`` / ``speakerUpdated`` / ``zoContentUpdated`` via the injected
+:class:`EventPublisher` port. The update use case emits only the events whose keys the FE actually
+sent in the partial patch. Payloads are plain JSON (value objects flattened via ``asdict``) so they
+match the FE listeners exactly. The default publisher is a no-op until Socket.IO is wired.
+"""
+
+from __future__ import annotations
+
+from dataclasses import asdict
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from mparlament.shared.realtime import EventPublisher, NullEventPublisher
+from mparlament.slices.sessions.domain.entities import (
+    CurrentSession,
+    Session,
+    Speaker,
+)
+from mparlament.slices.sessions.domain.ports import (
+    CurrentSessionRepository,
+    SessionRepository,
+    SpeakerRepository,
+)
+
+
+class GetCurrentSessionUseCase:
+    """Return the live session; a neutral empty object when none exists (never 404, per doc)."""
+
+    def __init__(self, repo: CurrentSessionRepository) -> None:
+        self._repo = repo
+
+    async def execute(self, session: AsyncSession) -> CurrentSession:
+        current = await self._repo.get(session)
+        return current if current is not None else CurrentSession()
+
+
+class UpdateCurrentSessionUseCase:
+    """Partial-merge the live session (spec #5). ``patch`` holds only the FE-sent keys."""
+
+    def __init__(
+        self,
+        repo: CurrentSessionRepository,
+        publisher: EventPublisher | None = None,
+    ) -> None:
+        self._repo = repo
+        self._publisher = publisher or NullEventPublisher()
+
+    async def execute(self, session: AsyncSession, patch: dict) -> CurrentSession:
+        current = await self._repo.get(session) or CurrentSession()
+        merged = current.with_patch(patch)
+        saved = await self._repo.save(session, merged)
+        await self._emit(patch, saved)
+        return saved
+
+    async def _emit(self, patch: dict, saved: CurrentSession) -> None:
+        """Emit one event per FE-sent live-session key (doc 10 / spec Â§5)."""
+        if "schedule" in patch:
+            await self._publisher.emit(
+                "scheduleUpdated", [asdict(item) for item in saved.schedule]
+            )
+        if "currentSpeaker" in patch:
+            speaker = asdict(saved.currentSpeaker) if saved.currentSpeaker else None
+            await self._publisher.emit("speakerUpdated", speaker)
+        if "zoContent" in patch:
+            await self._publisher.emit("zoContentUpdated", saved.zoContent)
+
+
+class ListSessionsUseCase:
+    """All session-list rows (#7)."""
+
+    def __init__(self, repo: SessionRepository) -> None:
+        self._repo = repo
+
+    async def execute(self, session: AsyncSession) -> list[Session]:
+        return await self._repo.list_all(session)
+
+
+class ListSpeakersUseCase:
+    """All speaker-registry rows (#39)."""
+
+    def __init__(self, repo: SpeakerRepository) -> None:
+        self._repo = repo
+
+    async def execute(self, session: AsyncSession) -> list[Speaker]:
+        return await self._repo.list_all(session)
+
+
+class AddSpeakerUseCase:
+    """Append a speaker to the registry (#40)."""
+
+    def __init__(
+        self,
+        repo: SpeakerRepository,
+        publisher: EventPublisher | None = None,
+    ) -> None:
+        self._repo = repo
+        self._publisher = publisher or NullEventPublisher()
+
+    async def execute(
+        self, session: AsyncSession, name: str, club: str | None, role: str | None
+    ) -> Speaker:
+        speaker = await self._repo.add(
+            session, Speaker(id=None, name=name, club=club, role=role)
+        )
+        # The FE ``newSpeaker`` listener reads {name, club, role, time}; the registry entity has
+        # no ``time`` (that lives on the live session's CurrentSpeaker), so it is null here.
+        await self._publisher.emit(
+            "speakerUpdated",
+            {"name": speaker.name, "club": speaker.club, "role": speaker.role, "time": None},
+        )
+        return speaker
+
+
+
+═══════════════════════════════════════════════════════════════
+FILE: src\mparlament\slices\sessions\domain\entities.py
+═══════════════════════════════════════════════════════════════
+
+"""Sessions-slice domain (framework-free) â€” spec Â§2 (Session, CurrentSession, Speaker).
+
+Three aggregates plus the value objects the live session is composed of:
+- ``CurrentSession`` â€” the "na ĹĽywo" superset object read under both path aliases (C6). Its
+  complex members are frozen value objects (``CurrentSpeaker``, ``AgendaPoint``, ``ScheduleItem``).
+  ``with_patch`` implements the partial-merge semantics of ``PUT /api/session/current`` (spec #5):
+  only the keys the FE sends are overwritten; everything else is left intact.
+- ``Session`` â€” a list row (spec Â§2 Session, #7): ``{id, name, date, city}`` plus optional FE
+  fallback fields.
+- ``Speaker`` â€” the speaker registry entity (#39/#40): ``{id, name, club, role}``. Distinct from
+  the ``CurrentSpeaker`` value object embedded in the live session (which also carries ``time``).
+
+Dates/times are kept as the verbatim FE-format strings (C13); the domain does not parse them.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field, replace
+
+SCHEDULE_STATUSES = frozenset({"done", "active", "waiting", "crossed", "disabled"})
+
+
+@dataclass(frozen=True)
+class CurrentSpeaker:
+    """Current speaker on the live session (``{name, club, role, time?}``)."""
+
+    name: str
+    club: str | None = None
+    role: str | None = None
+    time: str | None = None
+
+
+@dataclass(frozen=True)
+class AgendaPoint:
+    """Current agenda point (``{number, title, type}``)."""
+
+    number: str | None = None
+    title: str | None = None
+    type: str | None = None
+
+
+@dataclass(frozen=True)
+class ScheduleItem:
+    """One schedule row (``{time, title, status}``); status from the allowed set."""
+
+    time: str | None = None
+    title: str | None = None
+    status: str = "waiting"
+
+    def __post_init__(self) -> None:
+        if self.status not in SCHEDULE_STATUSES:
+            raise ValueError(
+                f"Unknown schedule status {self.status!r}; "
+                f"allowed: {sorted(SCHEDULE_STATUSES)}"
+            )
+
+
+def _to_speaker(value: object) -> CurrentSpeaker | None:
+    if value is None or isinstance(value, CurrentSpeaker):
+        return value  # type: ignore[return-value]
+    return CurrentSpeaker(**dict(value))  # type: ignore[arg-type]
+
+
+def _to_point(value: object) -> AgendaPoint | None:
+    if value is None or isinstance(value, AgendaPoint):
+        return value  # type: ignore[return-value]
+    return AgendaPoint(**dict(value))  # type: ignore[arg-type]
+
+
+def _to_schedule(value: object) -> list[ScheduleItem]:
+    items: list[ScheduleItem] = []
+    for raw in value or []:  # type: ignore[union-attr]
+        items.append(raw if isinstance(raw, ScheduleItem) else ScheduleItem(**dict(raw)))
+    return items
+
+
+@dataclass
+class CurrentSession:
+    """The live sitting â€” superset object served under #4 and #6 (C6)."""
+
+    id: int = 1
+    title: str = ""
+    status: str = ""
+    active: bool = False
+    date: str | None = None
+    start: str | None = None
+    startTime: str | None = None
+    end: str | None = None
+    endTime: str | None = None
+    currentSpeaker: CurrentSpeaker | None = None
+    currentPoint: AgendaPoint | None = None
+    schedule: list[ScheduleItem] = field(default_factory=list)
+    zoContent: str = ""
+
+    def __post_init__(self) -> None:
+        # Coerce dict/list inputs (e.g. from JSON persistence) into value objects.
+        self.currentSpeaker = _to_speaker(self.currentSpeaker)
+        self.currentPoint = _to_point(self.currentPoint)
+        self.schedule = _to_schedule(self.schedule)
+
+    _VO_FIELDS = {
+        "currentSpeaker": _to_speaker,
+        "currentPoint": _to_point,
+        "schedule": _to_schedule,
+    }
+
+    def with_patch(self, patch: dict) -> "CurrentSession":
+        """Return a copy with only ``patch``'s keys overwritten (partial PUT, spec #5)."""
+        changes: dict[str, object] = {}
+        for key, value in patch.items():
+            if key not in self.__dataclass_fields__ or key.startswith("_"):
+                continue  # ignore unknown keys the FE may send
+            coerce = self._VO_FIELDS.get(key)
+            changes[key] = coerce(value) if coerce else value
+        return replace(self, **changes)
+
+
+@dataclass
+class Session:
+    """A session-list row (spec Â§2 Session, #7). Optional fields are FE fallbacks."""
+
+    id: int
+    name: str
+    date: str | None = None
+    city: str | None = None
+    number: str | None = None
+    start: str | None = None
+    startTime: str | None = None
+    end: str | None = None
+    endTime: str | None = None
+
+
+@dataclass
+class Speaker:
+    """Speaker registry entity (#39/#40). ``id`` is assigned on persistence."""
+
+    id: int | None
+    name: str
+    club: str | None = None
+    role: str | None = None
+
+
+
+═══════════════════════════════════════════════════════════════
+FILE: src\mparlament\slices\sessions\infrastructure\models.py
+═══════════════════════════════════════════════════════════════
+
+"""SQLAlchemy models for the sessions slice.
+
+- ``current_session`` â€” a singleton row (id=1, C6) holding the live sitting's scalar fields plus
+  its document-shaped members (``currentSpeaker``, ``currentPoint``, ``schedule``) as JSON columns.
+  JSON avoids premature normalization (YAGNI) while matching the FE's document reads/writes.
+- ``sessions`` â€” the session-list rows (#7).
+- ``speakers`` â€” the speaker registry (#39/#40).
+
+Registered on ``Base.metadata`` via ``shared.models_registry`` so create_all/Alembic see them.
+"""
+
+from __future__ import annotations
+
+from sqlalchemy import JSON, Boolean, Integer, String
+from sqlalchemy.orm import Mapped, mapped_column
+
+from mparlament.shared.db import Base
+
+
+class CurrentSessionModel(Base):
+    __tablename__ = "current_session"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    title: Mapped[str] = mapped_column(String, default="")
+    status: Mapped[str] = mapped_column(String, default="")
+    active: Mapped[bool] = mapped_column(Boolean, default=False)
+    date: Mapped[str | None] = mapped_column(String, nullable=True)
+    start: Mapped[str | None] = mapped_column(String, nullable=True)
+    start_time: Mapped[str | None] = mapped_column(String, nullable=True)
+    end: Mapped[str | None] = mapped_column(String, nullable=True)
+    end_time: Mapped[str | None] = mapped_column(String, nullable=True)
+    current_speaker: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    current_point: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    schedule: Mapped[list] = mapped_column(JSON, default=list)
+    zo_content: Mapped[str] = mapped_column(String, default="")
+
+
+class SessionModel(Base):
+    __tablename__ = "sessions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String, default="")
+    date: Mapped[str | None] = mapped_column(String, nullable=True)
+    city: Mapped[str | None] = mapped_column(String, nullable=True)
+    number: Mapped[str | None] = mapped_column(String, nullable=True)
+    start: Mapped[str | None] = mapped_column(String, nullable=True)
+    start_time: Mapped[str | None] = mapped_column(String, nullable=True)
+    end: Mapped[str | None] = mapped_column(String, nullable=True)
+    end_time: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class SpeakerModel(Base):
+    __tablename__ = "speakers"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String, default="")
+    club: Mapped[str | None] = mapped_column(String, nullable=True)
+    role: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+
+═══════════════════════════════════════════════════════════════
+FILE: src\mparlament\slices\amendments\domain\entities.py
+═══════════════════════════════════════════════════════════════
+
+"""Amendments-slice domain (framework-free) â€” spec Â§2 (Amendment), Â§4 (AMENDMENTS).
+
+- ``Amendment`` â€” the poprawka aggregate. Carries the persisted fields the FE reads/writes
+  (spec Â§2 Amendment). ``changes`` is a document-shaped list of ``Change`` value objects (stored
+  as JSON on the row â€” KISS/YAGNI, matches the FE's article-diff reads/writes). ``createdAt`` is a
+  verbatim FE-format date string ``YYYY-MM-DD`` (C13); the domain never parses it.
+- ``Change`` â€” one article diff ``{articleId, before, after, type?}``. Value-conventions (spec Â§2):
+  ``before=null/""`` â†’ new article (``add``); ``after="(usuniÄ™ty)"``/``""`` â†’ deletion
+  (``delete``); ``add`` uses ``articleId="new_<timestamp>"``. The domain stores the shape as-is â€”
+  it does not rewrite the convention values (the FE authored them).
+
+Domain behaviour: only the author may ``withdraw`` their amendment (author-only, C3); withdrawing
+an already-withdrawn amendment is a conflict (C11). Statuses: pending|accepted|rejected|withdrawn.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from mparlament.shared.domain import ConflictError, PermissionDeniedError
+
+PENDING = "pending"
+ACCEPTED = "accepted"
+REJECTED = "rejected"
+WITHDRAWN = "withdrawn"
+
+_NOT_AUTHOR = "Brak uprawnieĹ„"
+_ALREADY_WITHDRAWN = "Poprawka zostaĹ‚a juĹĽ wycofana"
+_DEFAULT_REASON = "Brak podanego powodu"
+
+
+# --- value object ----------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Change:
+    """A single article diff within an amendment (spec Â§2 Amendment.changes[]).
+
+    ``type`` â {modify, add, delete} and is optional (the FE may omit it). Convention values
+    (``before=""`` for add, ``after="(usuniÄ™ty)"``/``""`` for delete) are stored verbatim.
+    """
+
+    articleId: str | int | None = None
+    before: str = ""
+    after: str = ""
+    type: str | None = None
+
+
+def _to_change(value: object) -> Change:
+    if isinstance(value, Change):
+        return value
+    data = dict(value)  # type: ignore[arg-type]
+    return Change(
+        articleId=data.get("articleId"),
+        before=data.get("before", "") or "",
+        after=data.get("after", "") or "",
+        type=data.get("type"),
+    )
+
+
+# --- entity ----------------------------------------------------------------
+
+
+@dataclass
+class Amendment:
+    """The poprawka aggregate (spec Â§2 Amendment)."""
+
+    id: int | None = None
+    resolutionId: int | None = None
+    author: str = ""
+    authorId: int | None = None
+    club: str | None = None
+    content: str = ""
+    status: str = PENDING  # pending|accepted|rejected|withdrawn
+    createdAt: str | None = None  # "YYYY-MM-DD" (C13)
+    withdrawnReason: str | None = None
+    changes: list = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.changes = [_to_change(c) for c in self.changes]
+
+    def is_author(self, user_id: int | None) -> bool:
+        return user_id is not None and self.authorId == user_id
+
+    def withdraw(self, actor_id: int | None, reason: str | None) -> None:
+        """Withdraw this amendment (spec #28): author-only, once.
+
+        Raises ``PermissionDeniedError`` (403) when ``actor_id`` is not the author, and
+        ``ConflictError`` (400) when the amendment is already withdrawn. On success sets
+        ``status="withdrawn"`` and records ``withdrawnReason`` (default when none given, C11).
+        """
+        if not self.is_author(actor_id):
+            raise PermissionDeniedError(_NOT_AUTHOR)
+        if self.status == WITHDRAWN:
+            raise ConflictError(_ALREADY_WITHDRAWN)
+        self.status = WITHDRAWN
+        self.withdrawnReason = reason or _DEFAULT_REASON
+
+
+
+═══════════════════════════════════════════════════════════════
+FILE: src\mparlament\slices\amendments\application\use_cases.py
+═══════════════════════════════════════════════════════════════
+
+"""Application use cases for the amendments slice (doc 07).
+
+Read/write orchestration over the amendment repository plus the resolutions slice's parent lookup
+(``resolve_resolution``, C5) and ``SessionLookup``. Projections live in ``views.py`` and identity
+is resolved in the router (C2), so these stay unit-testable without FastAPI.
+
+- ``ListResolutionAmendmentsUseCase`` (#23/#23b) â€” polymorphic parent â†’ ``{resolution, session,
+  amendments}``.
+- ``CreateAmendmentUseCase`` (#24) â€” resolve parent (404), server-assign ``id/createdAt/
+  resolutionId`` â†’ ``{success, amendment}``.
+- ``GetAmendmentUnderResolutionUseCase`` (#25) â€” ``{resolution, amendment, session}``; 404 poprawki.
+- ``ListAmendmentsUseCase`` (#26) â€” **bare array**.
+- ``GetAmendmentUseCase`` (#27) â€” ``{data: {...amendment, resolution:{id,title,slug}}}``.
+- ``WithdrawAmendmentUseCase`` (#28) â€” author-only withdraw (404/400/403).
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from mparlament.shared.domain import NotFoundError
+from mparlament.slices.amendments.application.dtos import AmendmentCreateBody
+from mparlament.slices.amendments.application.views import amendment_dict
+from mparlament.slices.amendments.domain.entities import Amendment
+from mparlament.slices.amendments.domain.ports import AmendmentRepository
+from mparlament.slices.resolutions.domain.entities import Resolution
+from mparlament.slices.resolutions.domain.ports import ResolutionRepository, SessionLookup
+from mparlament.slices.resolutions.domain.services import resolve_resolution
+
+_AMENDMENT_NOT_FOUND = "Nie znaleziono poprawki"
+_RESOLUTION_NOT_FOUND = "Nie znaleziono uchwaĹ‚y"
+
+
+def _today() -> str:
+    return dt.date.today().isoformat()  # "YYYY-MM-DD" (C13)
+
+
+def _session_block(info) -> dict | None:
+    return {"city": info.city, "date": info.date} if info else None
+
+
+def _resolution_ref(resolution: Resolution) -> dict:
+    """The ``{title, slug}`` parent ref the composite amendment wrappers carry (#23/#25)."""
+    return {"title": resolution.title, "slug": resolution.slug}
+
+
+class _AmendmentUseCase:
+    """Shared wiring: amendment repo + resolutions parent lookup + session block."""
+
+    def __init__(
+        self,
+        amendments: AmendmentRepository,
+        resolutions: ResolutionRepository,
+        sessions: SessionLookup,
+    ) -> None:
+        self._amendments = amendments
+        self._resolutions = resolutions
+        self._sessions = sessions
+
+    async def _resolve_parent(self, session: AsyncSession, param: str) -> Resolution:
+        resolution = await resolve_resolution(session, param, self._resolutions)
+        if resolution is None:
+            raise NotFoundError(_RESOLUTION_NOT_FOUND)
+        return resolution
+
+
+class ListResolutionAmendmentsUseCase(_AmendmentUseCase):
+    """Amendments of one resolution (spec #23/#23b): ``{resolution, session, amendments}``.
+
+    ``param`` is polymorphic (slug or id, C5): ``AmendmentsPage`` passes a slug,
+    ``FinalizeResolution`` passes the numeric ``resolutionId``.
+    """
+
+    async def execute(self, session: AsyncSession, param: str) -> dict:
+        resolution = await self._resolve_parent(session, param)
+        amendments = await self._amendments.list_by_resolution(session, resolution.id)
+        info = await self._sessions.get(session, resolution.sessionId)
+        return {
+            "resolution": _resolution_ref(resolution),
+            "session": _session_block(info),
+            "amendments": [amendment_dict(a) for a in amendments],
+        }
+
+
+class CreateAmendmentUseCase(_AmendmentUseCase):
+    """Persist a new amendment under a resolution (spec #24): ``{success, amendment}``.
+
+    Resolves the parent (404 when missing), then server-assigns ``resolutionId`` (from the parent),
+    ``createdAt`` (today) and ``id``. Identity/author come from the body (``authorId``, C2).
+    """
+
+    async def execute(
+        self, session: AsyncSession, param: str, body: AmendmentCreateBody
+    ) -> dict:
+        resolution = await self._resolve_parent(session, param)
+        amendment = Amendment(
+            **body.as_amendment_kwargs(),
+            resolutionId=resolution.id,
+            createdAt=_today(),
+        )
+        created = await self._amendments.add(session, amendment)
+        return {"success": True, "amendment": amendment_dict(created)}
+
+
+class GetAmendmentUnderResolutionUseCase(_AmendmentUseCase):
+    """One amendment under a resolution (spec #25): ``{resolution, amendment, session}``.
+
+    404 ``Nie znaleziono poprawki`` when the amendment is missing or does not belong to the parent.
+    """
+
+    async def execute(
+        self, session: AsyncSession, param: str, amendment_id: int
+    ) -> dict:
+        resolution = await self._resolve_parent(session, param)
+        amendment = await self._amendments.get_by_id(session, amendment_id)
+        if amendment is None or amendment.resolutionId != resolution.id:
+            raise NotFoundError(_AMENDMENT_NOT_FOUND)
+        info = await self._sessions.get(session, resolution.sessionId)
+        return {
+            "resolution": _resolution_ref(resolution),
+            "amendment": amendment_dict(amendment),
+            "session": _session_block(info),
+        }
+
+
+class ListAmendmentsUseCase(_AmendmentUseCase):
+    """All amendments as a **bare array** (spec #26, C10)."""
+
+    async def execute(self, session: AsyncSession) -> list[dict]:
+        amendments = await self._amendments.list_all(session)
+        return [amendment_dict(a) for a in amendments]
+
+
+class GetAmendmentUseCase(_AmendmentUseCase):
+    """One amendment wrapped for the voting linked-item read (spec #27, C10).
+
+    200 â†’ ``{data: {...amendment, resolution:{id,title,slug}}}``. The nested ``resolution`` block is
+    omitted-as-``None`` when the parent no longer exists (loose coupling). 404 when the amendment
+    itself is missing.
+    """
+
+    async def execute(self, session: AsyncSession, amendment_id: int) -> dict:
+        amendment = await self._amendments.get_by_id(session, amendment_id)
+        if amendment is None:
+            raise NotFoundError(_AMENDMENT_NOT_FOUND)
+        resolution = None
+        if amendment.resolutionId is not None:
+            resolution = await self._resolutions.get_by_id(
+                session, amendment.resolutionId
+            )
+        data = amendment_dict(amendment)
+        data["resolution"] = (
+            {
+                "id": resolution.id,
+                "title": resolution.title,
+                "slug": resolution.slug,
+            }
+            if resolution
+            else None
+        )
+        return {"data": data}
+
+
+class WithdrawAmendmentUseCase(_AmendmentUseCase):
+    """Author-only withdraw (spec #28): 404 (missing) / 400 (already withdrawn) / 403 (not author).
+
+    Identity (``actor_id``) is resolved in the router via the C2 chain; the author check and the
+    already-withdrawn conflict live in the domain (``Amendment.withdraw``).
+    """
+
+    async def execute(
+        self,
+        session: AsyncSession,
+        amendment_id: int,
+        actor_id: int | None,
+        reason: str | None,
+    ) -> dict:
+        amendment = await self._amendments.get_by_id(session, amendment_id)
+        if amendment is None:
+            raise NotFoundError(_AMENDMENT_NOT_FOUND)
+        amendment.withdraw(actor_id, reason)
+        updated = await self._amendments.update(session, amendment)
+        return {"success": True, "amendment": amendment_dict(updated)}
+
+
+
+═══════════════════════════════════════════════════════════════
+FILE: src\mparlament\slices\amendments\infrastructure\models.py
+═══════════════════════════════════════════════════════════════
+
+"""SQLAlchemy model for the amendments slice.
+
+``amendments`` â€” scalar columns plus a JSON ``changes`` column (document-shaped article diffs;
+matches the FE's reads/writes and avoids over-normalizing changes â€” KISS/YAGNI). ``resolution_id``
+is a FK to ``resolutions.id`` (cascade delete: an amendment cannot outlive its parent uchwaĹ‚a).
+``created_at`` is a date string ``YYYY-MM-DD`` (C13).
+
+Registered on ``Base.metadata`` via ``shared.models_registry`` so create_all/Alembic see it.
+"""
+
+from __future__ import annotations
+
+from sqlalchemy import JSON, ForeignKey, Integer, String
+from sqlalchemy.orm import Mapped, mapped_column
+
+from mparlament.shared.db import Base
+
+
+class AmendmentModel(Base):
+    __tablename__ = "amendments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    resolution_id: Mapped[int] = mapped_column(
+        ForeignKey("resolutions.id", ondelete="CASCADE"), index=True
+    )
+    author: Mapped[str] = mapped_column(String, default="")
+    author_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    club: Mapped[str | None] = mapped_column(String, nullable=True)
+    content: Mapped[str] = mapped_column(String, default="")
+    status: Mapped[str] = mapped_column(String, default="pending")
+    created_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    withdrawn_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    changes: Mapped[list] = mapped_column(JSON, default=list)
+
+
+
+═══════════════════════════════════════════════════════════════
+FILE: src\mparlament\slices\votings\domain\entities.py
+═══════════════════════════════════════════════════════════════
+
+"""Votings-slice domain (framework-free) â€” spec Â§2 (Voting, Vote), Â§6.1.5-6, Â§8.4.
+
+Two aggregates plus a value object and the pure domain services the slice needs:
+
+- ``Voting`` â€” the gĹ‚osowanie aggregate. Carries the persisted fields the FE writes (spec Â§2
+  Voting) and exposes the pure lifecycle/eligibility behaviour the use cases orchestrate:
+  ``eligible_users`` resolves recipients per ``recipientsType`` (C8), ``activate``/``archive``
+  set the authoritative ``status`` (C15). Computed stats (votesFor/â€¦) are **not** stored â€” a
+  read-time projection derives them from ``Vote`` rows (see ``application/views.py``).
+- ``Vote`` â€” a single cast vote ``{id, votingId, userId, value}`` with ``value`` normalized to the
+  canonical ``for|against|abstained`` (C4).
+- ``Attachment`` â€” the ``{id, name, size, type, uploadDate}`` metadata value object (#15).
+- ``DirectoryUser`` â€” the lightweight ``{id, name, club, group}`` view of a voter used for
+  eligibility + the ``{id,name,club}`` expansion the FE reads (supplied via the ``UserDirectory``
+  port so the slice never imports another slice's ORM).
+
+``normalize_vote`` is the single source of truth for the abstain-enum reconciliation (C4): the FE
+button sends ``"abstain"`` while storage/stats use ``"abstained"``.
+
+Dates/times are kept as verbatim FE-format strings (C13); the domain does not parse them.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field, replace
+
+from mparlament.shared.domain import ValidationError
+
+# --- vote enum (C4) --------------------------------------------------------
+
+VALID_VOTES = frozenset({"for", "against", "abstained"})
+
+
+def normalize_vote(raw: object) -> str:
+    """Reconcile the FE/storage abstain enum (C4).
+
+    Accepts ``for``/``against``/``abstain``/``abstained``; maps ``abstain â†’ abstained`` and
+    leaves the others unchanged. Anything else raises :class:`ValidationError` (422).
+    """
+    value = str(raw).strip().lower()
+    if value == "abstain":
+        value = "abstained"
+    if value not in VALID_VOTES:
+        raise ValidationError(f"NieprawidĹ‚owy gĹ‚os: {raw!r}")
+    return value
+
+
+# --- value objects ---------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Attachment:
+    """Voting attachment metadata (spec Â§2 Voting, #15). ``id`` may be str or int."""
+
+    name: str
+    id: str | int | None = None
+    size: int | None = None
+    type: str | None = None
+    uploadDate: str | None = None
+
+
+@dataclass(frozen=True)
+class DirectoryUser:
+    """A voter as the FE reads it in eligible/voted lists (``{id, name, club}``) plus ``group``.
+
+    ``group`` drives ``recipientsType="groups"`` eligibility (C8); it is not serialized to the FE.
+    """
+
+    id: int
+    name: str
+    club: str | None = None
+    group: str | None = None
+
+
+def _to_attachment(value: object) -> Attachment:
+    if isinstance(value, Attachment):
+        return value
+    return Attachment(**dict(value))  # type: ignore[arg-type]
+
+
+# --- entities --------------------------------------------------------------
+
+# Create-form option flags the FE sends but does not read back (persist as-is, spec Â§2 Voting).
+OPTION_KEYS = (
+    "quorumRequired",
+    "majorityType",
+    "allowAbstain",
+    "isAnonymous",
+    "requireComment",
+    "canChangeVote",
+    "showResultsDuringVoting",
+    "notifyEmail",
+    "notifyPush",
+)
+
+_RECIPIENTS = frozenset({"all", "groups", "members"})
+
+
+@dataclass
+class Voting:
+    """The gĹ‚osowanie aggregate (spec Â§2 Voting). Times/status are strings (C13/C15)."""
+
+    id: int | None = None
+    title: str = ""
+    description: str | None = None
+    category: str = "other"  # resolution|amendment|law|budget|committee|other
+    startTime: str | None = None  # ISO 8601 / datetime-local (C13)
+    endTime: str | None = None
+    status: str = "upcoming"  # active|finished|upcoming|archived (C15)
+    recipientsType: str = "all"  # all|groups|members (individualâ†’members, C8)
+    selectedGroups: list = field(default_factory=list)
+    selectedMembers: list = field(default_factory=list)
+    linkedItemType: str = "none"  # none|resolution|amendment
+    linkedItemId: str | None = None  # stored as string (polymorphic)
+    applicant: str | None = None
+    managers: list = field(default_factory=list)
+    attachments: list = field(default_factory=list)
+    createdBy: str | None = None
+    options: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # C8: the FE sometimes sends "individual"; the canonical stored value is "members".
+        if self.recipientsType == "individual":
+            self.recipientsType = "members"
+        self.attachments = [_to_attachment(a) for a in self.attachments]
+        if self.linkedItemId is not None:
+            self.linkedItemId = str(self.linkedItemId)
+
+    # --- eligibility (C8) --------------------------------------------------
+
+    def eligible_users(self, users: list[DirectoryUser]) -> list[DirectoryUser]:
+        """Resolve the eligible voters from the full directory per ``recipientsType`` (C8)."""
+        if self.recipientsType == "groups":
+            wanted = {str(g) for g in self.selectedGroups}
+            return [u for u in users if u.group is not None and str(u.group) in wanted]
+        if self.recipientsType == "members":
+            wanted = {int(m) for m in self.selectedMembers}
+            return [u for u in users if u.id in wanted]
+        # "all" (and any unexpected value) â†’ everyone (spec Â§6.1.6).
+        return list(users)
+
+    # --- lifecycle (C15) ---------------------------------------------------
+
+    def activate(
+        self,
+        startTime: str | None = None,
+        endTime: str | None = None,
+        duration: object = None,  # noqa: ARG002 - accepted from FE, not persisted separately
+        delay: object = None,  # noqa: ARG002
+    ) -> None:
+        """Authoritatively set ``status="active"`` and the times the FE provided (spec #13)."""
+        if startTime is not None:
+            self.startTime = startTime
+        if endTime is not None:
+            self.endTime = endTime
+        self.status = "active"
+
+    def archive(self) -> None:
+        """Authoritatively set ``status="archived"`` (spec #14, C15)."""
+        self.status = "archived"
+
+    def with_changes(self, **changes: object) -> "Voting":
+        """Return a copy with the given fields overwritten (used by update, spec #11)."""
+        return replace(self, **changes)  # type: ignore[arg-type]
+
+
+@dataclass
+class Vote:
+    """A single cast vote (spec Â§2 Vote). ``value`` is normalized on construction (C4)."""
+
+    votingId: int
+    userId: int
+    value: str
+    id: int | None = None
+
+    def __post_init__(self) -> None:
+        self.value = normalize_vote(self.value)
+
+
+
+═══════════════════════════════════════════════════════════════
+FILE: src\mparlament\slices\votings\application\use_cases.py
+═══════════════════════════════════════════════════════════════
+
+"""Application use cases for the votings slice (doc 05).
+
+Read/write orchestration over the domain ports; the computed projection lives in ``views.py`` and
+RBAC is enforced in the router (C3), so these stay unit-testable without FastAPI. The read use
+cases fan out one vote query per voting â€” fine at this scale (KISS); a batch load is a later
+optimization if the list grows.
+
+Realtime note (doc 10 / spec Â§5): ``CastVoteUseCase`` and ``ArchiveVotingUseCase`` emit
+``voteUpdate:<id>`` at commit time via the injected :class:`EventPublisher` port. The payload is
+derived from the same read projection the REST detail endpoint returns (``build_voting_view``), so
+socket and REST stay in parity (doc 10 "fallback parity"). The default publisher is a no-op, so the
+emit is free until Socket.IO is wired.
+"""
+
+from __future__ import annotations
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from mparlament.shared.domain import ConflictError, NotFoundError
+from mparlament.shared.realtime import EventPublisher, NullEventPublisher
+from mparlament.slices.votings.application.views import build_voting_view
+from mparlament.slices.votings.domain.entities import (
+    Voting,
+    Vote,
+    normalize_vote,
+)
+from mparlament.slices.votings.domain.ports import (
+    LinkedItemStatusUpdater,
+    UserDirectory,
+    VoteRepository,
+    VotingRepository,
+)
+
+_NOT_FOUND = "Nie znaleziono gĹ‚osowania"
+_ALREADY_VOTED = "UĹĽytkownik juĹĽ oddaĹ‚ gĹ‚os"
+
+
+# The live-tally fields the FE reads from a ``voteUpdate:<id>`` event â€” a subset of the REST
+# detail view, so socket and polling stay in parity (doc 10 / spec Â§5).
+_VOTE_UPDATE_KEYS = (
+    "votedCount",
+    "votesFor",
+    "votesAgainst",
+    "abstained",
+    "votedUsers",
+    "notVotedUsers",
+)
+
+
+class _VotingUseCase:
+    """Shared wiring: the three read collaborators used to build a computed view."""
+
+    def __init__(
+        self,
+        votings: VotingRepository,
+        votes: VoteRepository,
+        directory: UserDirectory,
+        publisher: EventPublisher | None = None,
+    ) -> None:
+        self._votings = votings
+        self._votes = votes
+        self._directory = directory
+        self._publisher = publisher or NullEventPublisher()
+
+    async def _view(
+        self, session: AsyncSession, voting: Voting, requester_id: int | None
+    ) -> dict:
+        votes = await self._votes.list_by_voting(session, voting.id)
+        users = await self._directory.list_all(session)
+        return build_voting_view(voting, votes, users, requester_id)
+
+    async def _emit_vote_update(self, session: AsyncSession, voting: Voting) -> None:
+        """Emit ``voteUpdate:<id>`` with the requester-agnostic live tally (doc 10)."""
+        view = await self._view(session, voting, requester_id=None)
+        payload = {key: view[key] for key in _VOTE_UPDATE_KEYS}
+        await self._publisher.emit(f"voteUpdate:{voting.id}", payload)
+
+
+class ListVotingsUseCase(_VotingUseCase):
+    """All votings with computed fields â€” a **bare array** (spec #8, C10)."""
+
+    async def execute(
+        self, session: AsyncSession, requester_id: int | None
+    ) -> list[dict]:
+        votings = await self._votings.list_all(session)
+        users = await self._directory.list_all(session)
+        views = []
+        for voting in votings:
+            votes = await self._votes.list_by_voting(session, voting.id)
+            views.append(build_voting_view(voting, votes, users, requester_id))
+        return views
+
+
+class GetVotingUseCase(_VotingUseCase):
+    """Full voting + computed lists (spec #9); 404 when absent."""
+
+    async def execute(
+        self, session: AsyncSession, voting_id: int, requester_id: int | None
+    ) -> dict:
+        voting = await self._votings.get(session, voting_id)
+        if voting is None:
+            raise NotFoundError(_NOT_FOUND)
+        return await self._view(session, voting, requester_id)
+
+
+class CreateVotingUseCase(_VotingUseCase):
+    """Persist a new voting (RBAC in router); returns the created view with ``id`` (spec #10)."""
+
+    async def execute(
+        self, session: AsyncSession, voting: Voting, requester_id: int | None
+    ) -> dict:
+        created = await self._votings.add(session, voting)
+        return await self._view(session, created, requester_id)
+
+
+class UpdateVotingUseCase(_VotingUseCase):
+    """Replace a voting's editable fields (spec #11); 404 when absent."""
+
+    async def execute(
+        self,
+        session: AsyncSession,
+        voting_id: int,
+        new_voting: Voting,
+        requester_id: int | None,
+    ) -> dict:
+        existing = await self._votings.get(session, voting_id)
+        if existing is None:
+            raise NotFoundError(_NOT_FOUND)
+        new_voting.id = voting_id
+        updated = await self._votings.update(session, new_voting)
+        return await self._view(session, updated, requester_id)
+
+
+class CastVoteUseCase(_VotingUseCase):
+    """Cast a single vote (spec #12): normalize (C4), enforce single-vote, save."""
+
+    async def execute(
+        self, session: AsyncSession, voting_id: int, user_id: int, raw_vote: object
+    ) -> dict:
+        voting = await self._votings.get(session, voting_id)
+        if voting is None:
+            raise NotFoundError(_NOT_FOUND)
+        value = normalize_vote(raw_vote)
+        if await self._votes.get_user_vote(session, voting_id, user_id) is not None:
+            raise ConflictError(_ALREADY_VOTED)
+        await self._votes.add(session, Vote(votingId=voting_id, userId=user_id, value=value))
+        await self._emit_vote_update(session, voting)
+        return {"vote": value, "message": "GĹ‚os zostaĹ‚ zapisany"}
+
+
+class ActivateVotingUseCase(_VotingUseCase):
+    """Set ``status="active"`` + times (spec #13, C15); 404 when absent."""
+
+    async def execute(
+        self,
+        session: AsyncSession,
+        voting_id: int,
+        startTime: str | None,
+        endTime: str | None,
+        duration: object,
+        delay: object,
+        requester_id: int | None,
+    ) -> dict:
+        voting = await self._votings.get(session, voting_id)
+        if voting is None:
+            raise NotFoundError(_NOT_FOUND)
+        voting.activate(startTime, endTime, duration, delay)
+        updated = await self._votings.update(session, voting)
+        view = await self._view(session, updated, requester_id)
+        return {"success": True, "message": "GĹ‚osowanie zostaĹ‚o aktywowane", "voting": view}
+
+
+class ArchiveVotingUseCase(_VotingUseCase):
+    """Archive + cascade the result onto the linked item's status (spec #14, C15)."""
+
+    def __init__(
+        self,
+        votings: VotingRepository,
+        votes: VoteRepository,
+        directory: UserDirectory,
+        linked_updater: LinkedItemStatusUpdater,
+        publisher: EventPublisher | None = None,
+    ) -> None:
+        super().__init__(votings, votes, directory, publisher)
+        self._linked = linked_updater
+
+    async def execute(
+        self, session: AsyncSession, voting_id: int, requester_id: int | None
+    ) -> dict:
+        voting = await self._votings.get(session, voting_id)
+        if voting is None:
+            raise NotFoundError(_NOT_FOUND)
+        voting.archive()
+        updated = await self._votings.update(session, voting)
+
+        if voting.linkedItemType and voting.linkedItemType != "none":
+            votes = await self._votes.list_by_voting(session, voting_id)
+            votes_for = sum(1 for v in votes if v.value == "for")
+            votes_against = sum(1 for v in votes if v.value == "against")
+            result = "accepted" if votes_for > votes_against else "rejected"
+            await self._linked.update_status(
+                session, voting.linkedItemType, voting.linkedItemId, result
+            )
+        await self._emit_vote_update(session, updated)
+        view = await self._view(session, updated, requester_id)
+        return {"success": True, "voting": view}
+
+
+class AddAttachmentsUseCase(_VotingUseCase):
+    """Store uploaded files + append their metadata to the voting (spec #15, fire-and-forget)."""
+
+    def __init__(
+        self,
+        votings: VotingRepository,
+        votes: VoteRepository,
+        directory: UserDirectory,
+        storage,
+        max_bytes: int = 10 * 1024 * 1024,
+    ) -> None:
+        super().__init__(votings, votes, directory)
+        self._storage = storage
+        self._max_bytes = max_bytes
+
+    async def execute(
+        self, session: AsyncSession, voting_id: int, files: list[tuple[str, bytes, str | None]]
+    ) -> dict:
+        from mparlament.shared.domain import ValidationError
+        from mparlament.slices.votings.domain.entities import Attachment
+
+        voting = await self._votings.get(session, voting_id)
+        if voting is None:
+            raise NotFoundError(_NOT_FOUND)
+
+        for name, data, content_type in files:
+            if len(data) > self._max_bytes:
+                raise ValidationError("Plik przekracza dozwolony rozmiar")
+            await self._storage.save(f"votings/{voting_id}", name, data)
+            voting.attachments.append(
+                Attachment(
+                    id=len(voting.attachments) + 1,
+                    name=name,
+                    size=len(data),
+                    type=content_type,
+                    uploadDate=None,
+                )
+            )
+        await self._votings.update(session, voting)
+        return {"success": True}
+
+
+class DeleteVotingUseCase(_VotingUseCase):
+    """Delete a voting (spec #16, handler-only)."""
+
+    async def execute(self, session: AsyncSession, voting_id: int) -> dict:
+        await self._votings.delete(session, voting_id)
+        return {"success": True}
+
+
+
+═══════════════════════════════════════════════════════════════
+FILE: src\mparlament\slices\votings\infrastructure\models.py
+═══════════════════════════════════════════════════════════════
+
+"""SQLAlchemy models for the votings slice.
+
+- ``votings`` â€” scalar columns plus JSON columns for the list/document-shaped fields
+  (``selected_groups``, ``selected_members``, ``managers``, ``attachments``, ``options``). JSON
+  avoids premature normalization (YAGNI) while matching the FE's document reads/writes.
+  ``linked_item_id`` is stored as a string (polymorphic â€” uchwaĹ‚a/poprawka po ID).
+- ``votes`` â€” one row per cast vote with a **unique (voting_id, user_id)** constraint enforcing the
+  single-vote rule at the DB level (the application check is the fast path; this is the backstop).
+
+Registered on ``Base.metadata`` via ``shared.models_registry`` so create_all/Alembic see them.
+"""
+
+from __future__ import annotations
+
+from sqlalchemy import JSON, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column
+
+from mparlament.shared.db import Base
+
+
+class VotingModel(Base):
+    __tablename__ = "votings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    title: Mapped[str] = mapped_column(String, default="")
+    description: Mapped[str | None] = mapped_column(String, nullable=True)
+    category: Mapped[str] = mapped_column(String, default="other")
+    start_time: Mapped[str | None] = mapped_column(String, nullable=True)
+    end_time: Mapped[str | None] = mapped_column(String, nullable=True)
+    status: Mapped[str] = mapped_column(String, default="upcoming")
+    recipients_type: Mapped[str] = mapped_column(String, default="all")
+    selected_groups: Mapped[list] = mapped_column(JSON, default=list)
+    selected_members: Mapped[list] = mapped_column(JSON, default=list)
+    linked_item_type: Mapped[str] = mapped_column(String, default="none")
+    linked_item_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    applicant: Mapped[str | None] = mapped_column(String, nullable=True)
+    managers: Mapped[list] = mapped_column(JSON, default=list)
+    attachments: Mapped[list] = mapped_column(JSON, default=list)
+    created_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    options: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class VoteModel(Base):
+    __tablename__ = "votes"
+    __table_args__ = (
+        UniqueConstraint("voting_id", "user_id", name="uq_votes_voting_user"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    voting_id: Mapped[int] = mapped_column(
+        ForeignKey("votings.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    value: Mapped[str] = mapped_column(String)
+
+
+
+═══════════════════════════════════════════════════════════════
+FILE: src\mparlament\slices\votings\application\dtos.py
+═══════════════════════════════════════════════════════════════
+
+"""Pydantic request DTOs for the votings slice (spec Â§4 #10-#13).
+
+Responses are built as plain dicts by ``application/views.py`` (the computed projection carries
+many dynamic keys and the FE tolerates extras, C10) â€” so only *inputs* are modelled here.
+
+``VotingWriteInput`` covers the create/update body (#10/#11): the scalar Voting fields plus the
+create-form option flags, which are collected into an opaque ``options`` dict via ``to_domain``.
+``VoteInput`` and ``ActivateInput`` are the small action bodies (#12/#13).
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict
+
+from mparlament.slices.votings.domain.entities import OPTION_KEYS, Attachment, Voting
+
+
+class AttachmentInput(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: str
+    id: str | int | None = None
+    size: int | None = None
+    type: str | None = None
+    uploadDate: str | None = None
+
+
+class VotingWriteInput(BaseModel):
+    """``POST``/``PUT`` body (spec #10/#11). Unknown option flags are captured via ``extra``."""
+
+    model_config = ConfigDict(extra="allow")
+
+    title: str = ""
+    description: str | None = None
+    category: str = "other"
+    startTime: str | None = None
+    endTime: str | None = None
+    status: str | None = None
+    recipientsType: str = "all"
+    selectedGroups: list[Any] = []
+    selectedMembers: list[Any] = []
+    linkedItemType: str = "none"
+    linkedItemId: str | int | None = None
+    applicant: str | None = None
+    managers: list[int] = []
+    attachments: list[AttachmentInput] = []
+    createdBy: str | None = None
+
+    def to_domain(self, *, voting_id: int | None = None) -> Voting:
+        """Build the domain ``Voting`` (option flags gathered into ``options``, C15 default status)."""
+        extra = self.model_extra or {}
+        options = {key: extra[key] for key in OPTION_KEYS if key in extra}
+        return Voting(
+            id=voting_id,
+            title=self.title,
+            description=self.description,
+            category=self.category,
+            startTime=self.startTime,
+            endTime=self.endTime,
+            status=self.status or "upcoming",
+            recipientsType=self.recipientsType,
+            selectedGroups=list(self.selectedGroups),
+            selectedMembers=[int(m) for m in self.selectedMembers],
+            linkedItemType=self.linkedItemType,
+            linkedItemId=self.linkedItemId,
+            applicant=self.applicant,
+            managers=[int(m) for m in self.managers],
+            attachments=[Attachment(**a.model_dump()) for a in self.attachments],
+            createdBy=self.createdBy,
+            options=options,
+        )
+
+
+class VoteInput(BaseModel):
+    """``POST /api/votings/:id/vote`` body (spec #12)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    vote: str
+
+
+class ActivateInput(BaseModel):
+    """``POST /api/votings/:id/activate`` body (spec #13)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    startTime: str | None = None
+    endTime: str | None = None
+    duration: Any | None = None
+    delay: Any | None = None
+
+
+
+═══════════════════════════════════════════════════════════════
+FILE: src\mparlament\slices\parliamentarians_clubs\infrastructure\models.py
+═══════════════════════════════════════════════════════════════
+
+"""SQLAlchemy models for the parliamentarians & clubs slice (doc 08).
+
+- ``clubs`` â€” ``{id, name, type, color}``. Members are **not** stored on the club (spec Â§6.1.7);
+  they are derived from parliamentarians.
+- ``parliamentarians`` â€” ``{id, first_name, last_name, club_id FK nullable, functions JSON,
+  commissions JSON}``. ``club_id`` references ``clubs.id`` with ``ondelete=SET NULL`` so a DB-level
+  club delete unlinks members; the repository also unlinks explicitly to stay DB-agnostic (#36).
+
+Registered on ``Base.metadata`` via ``shared.models_registry`` so create_all/Alembic see them.
+"""
+
+from __future__ import annotations
+
+from sqlalchemy import JSON, ForeignKey, Integer, String
+from sqlalchemy.orm import Mapped, mapped_column
+
+from mparlament.shared.db import Base
+
+
+class ClubModel(Base):
+    __tablename__ = "clubs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String, default="")
+    type: Mapped[str] = mapped_column(String, default="klub")
+    color: Mapped[str] = mapped_column(String, default="")
+
+
+class ParliamentarianModel(Base):
+    __tablename__ = "parliamentarians"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    first_name: Mapped[str] = mapped_column(String, default="")
+    last_name: Mapped[str] = mapped_column(String, default="")
+    club_id: Mapped[int | None] = mapped_column(
+        ForeignKey("clubs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    functions: Mapped[list] = mapped_column(JSON, default=list)
+    commissions: Mapped[list] = mapped_column(JSON, default=list)
+
+
+
+═══════════════════════════════════════════════════════════════
+FILE: src\mparlament\slices\parliamentarians_clubs\domain\entities.py
+═══════════════════════════════════════════════════════════════
+
+"""Parliamentarians & clubs domain (framework-free) â€” spec Â§2 (Parliamentarian, Club), doc 08.
+
+The chamber registry is deliberately **distinct** from the ``User`` login collection (C9): these
+aggregates never join or sync with users in v1.
+
+- ``Parliamentarian`` â€” a member of the izba. Persists ``clubId`` (``None`` â‡’ niezrzeszony); the
+  ``clubName``/``clubColor`` fields are **derived at read time** from the referenced club (never
+  stored redundantly) by :func:`services.expand`. ``functions``/``commissions`` are free-text lists
+  the FE reads/writes as-is.
+- ``Club`` â€” a klub/koĹ‚o/komitet. ``type`` is constrained to the allowed set (invariant). ``members``
+  is derived from parliamentarians, not stored on the club (spec Â§6.1.7); it defaults to ``[]`` and
+  the required reads emit ``members: []`` (the FE computes counts from the parliamentarian list).
+- ``ClubMember`` â€” the shape a club's ``members[]`` would carry when expanded (spec Â§2 Club); kept
+  for the optional handler-only #37/#38 and never populated by the required reads.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from mparlament.shared.domain import ValidationError
+
+KLUB = "klub"
+KOLO = "koĹ‚o"
+KOMITET = "komitet"
+CLUB_TYPES = frozenset({KLUB, KOLO, KOMITET})
+
+_INVALID_TYPE = "NieprawidĹ‚owy typ klubu"
+
+
+# --- value object ----------------------------------------------------------
+
+
+@dataclass
+class ClubMember:
+    """A club member as the FE would read it inside an expanded ``Club.members[]`` (spec Â§2)."""
+
+    id: int | None = None
+    firstName: str = ""
+    lastName: str = ""
+    functions: list = field(default_factory=list)
+    commissions: list = field(default_factory=list)
+
+
+# --- entities --------------------------------------------------------------
+
+
+@dataclass
+class Parliamentarian:
+    """A member of the chamber registry (spec Â§2 Parliamentarian).
+
+    ``clubName``/``clubColor`` are transient read-time expansions (see :func:`services.expand`);
+    they are not persisted and stay ``None`` for the unaffiliated (``clubId is None``).
+    """
+
+    id: int | None = None
+    firstName: str = ""
+    lastName: str = ""
+    clubId: int | None = None
+    clubName: str | None = None
+    clubColor: str | None = None
+    functions: list = field(default_factory=list)
+    commissions: list = field(default_factory=list)
+
+    @property
+    def is_affiliated(self) -> bool:
+        return self.clubId is not None
+
+
+@dataclass
+class Club:
+    """A klub/koĹ‚o/komitet (spec Â§2 Club). ``type`` is validated against ``CLUB_TYPES``."""
+
+    id: int | None = None
+    name: str = ""
+    type: str = KLUB
+    color: str = ""
+    members: list = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.type not in CLUB_TYPES:
+            raise ValidationError(_INVALID_TYPE)
+
+
+
+═══════════════════════════════════════════════════════════════
+FILE: src\mparlament\slices\parliamentarians_clubs\application\dtos.py
+═══════════════════════════════════════════════════════════════
+
+"""Pydantic DTOs for the parliamentarians & clubs slice (spec Â§4 #30/#31, #34/#35).
+
+- ``ParliamentarianBody`` â€” the JSON the FE POSTs/PUTs (#30/#31). Carries an optional ``id`` so
+  POST can act as an upsert (C7); the router/UC decides create-vs-update.
+- ``ClubBody`` â€” ``{name, type, color}`` for #34/#35. ``type`` is validated in the domain ``Club``.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict
+
+from mparlament.slices.parliamentarians_clubs.domain.entities import (
+    Club,
+    Parliamentarian,
+)
+
+
+class ParliamentarianBody(BaseModel):
+    """The JSON body of ``POST /api/parliamentarians`` (#30) and ``PUT .../:id`` (#31)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: int | None = None
+    firstName: str = ""
+    lastName: str = ""
+    clubId: int | None = None
+    functions: list[str] = []
+    commissions: list[str] = []
+
+    def to_parliamentarian(self, *, id: int | None = None) -> Parliamentarian:
+        """Build a domain ``Parliamentarian``; ``id`` override wins (the PUT path id, #31)."""
+        return Parliamentarian(
+            id=id if id is not None else self.id,
+            firstName=self.firstName,
+            lastName=self.lastName,
+            clubId=self.clubId,
+            functions=list(self.functions),
+            commissions=list(self.commissions),
+        )
+
+
+class ClubBody(BaseModel):
+    """The JSON body of ``POST /api/clubs`` (#34) and ``PUT /api/clubs/:id`` (#35)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    name: str = ""
+    type: str = "klub"
+    color: str = ""
+
+    def to_club(self, *, id: int | None = None) -> Club:
+        """Build a domain ``Club`` (validates ``type``). ``id`` set on the update path (#35)."""
+        return Club(id=id, name=self.name, type=self.type, color=self.color)
+
+    def as_kwargs(self) -> dict[str, Any]:
+        return {"name": self.name, "type": self.type, "color": self.color}
+
+
+
+═══════════════════════════════════════════════════════════════
+FILE: src\mparlament\slices\parliamentarians_clubs\application\use_cases.py
+═══════════════════════════════════════════════════════════════
+
+"""Application use cases for the parliamentarians & clubs slice (doc 08).
+
+Thin orchestration over the two repositories plus the domain expansion/partition service. RBAC and
+identity are enforced in the router (C3); these stay unit-testable without FastAPI.
+
+Parliamentarians:
+- ``ListParliamentariansUseCase`` (#29) â†’ ``{parliamentarians:[clubId!=null], unaffiliated:[...]}``.
+- ``UpsertParliamentarianUseCase`` (#30) â€” POST-as-upsert (C7); expands club fields in the response.
+- ``UpdateParliamentarianUseCase`` (#31 PUT) â€” 404 when the id is unknown.
+- ``DeleteParliamentarianUseCase`` (#32) â€” removes the row (drops club membership); 404 when unknown.
+
+Clubs:
+- ``ListClubsUseCase`` (#33) â†’ **bare array**; ``members:[]``.
+- ``CreateClubUseCase`` (#34) / ``UpdateClubUseCase`` (#35) / ``DeleteClubUseCase`` (#36 unlink).
+"""
+
+from __future__ import annotations
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from mparlament.shared.domain import NotFoundError
+from mparlament.slices.parliamentarians_clubs.application.dtos import (
+    ClubBody,
+    ParliamentarianBody,
+)
+from mparlament.slices.parliamentarians_clubs.application.views import (
+    club_dict,
+    parliamentarian_dict,
+)
+from mparlament.slices.parliamentarians_clubs.domain.entities import Parliamentarian
+from mparlament.slices.parliamentarians_clubs.domain.ports import (
+    ClubRepository,
+    ParliamentarianRepository,
+)
+from mparlament.slices.parliamentarians_clubs.domain.services import expand, partition
+
+_PARLIAMENTARIAN_NOT_FOUND = "Nie znaleziono parlamentarzysty"
+_CLUB_NOT_FOUND = "Nie znaleziono klubu"
+
+
+# --- parliamentarians ------------------------------------------------------
+
+
+class _ParliamentarianUseCase:
+    """Shared wiring: parliamentarian repo + club repo (for read-time expansion)."""
+
+    def __init__(
+        self,
+        parliamentarians: ParliamentarianRepository,
+        clubs: ClubRepository,
+    ) -> None:
+        self._parliamentarians = parliamentarians
+        self._clubs = clubs
+
+    async def _expanded(
+        self, session: AsyncSession, parliamentarian: Parliamentarian
+    ) -> dict:
+        """Expand ``clubName``/``clubColor`` from ``clubId`` and project to the FE shape."""
+        club = (
+            await self._clubs.get_by_id(session, parliamentarian.clubId)
+            if parliamentarian.clubId is not None
+            else None
+        )
+        expand(parliamentarian, club)
+        return parliamentarian_dict(parliamentarian)
+
+
+class ListParliamentariansUseCase(_ParliamentarianUseCase):
+    """Registry partitioned by affiliation (spec #29, C10)."""
+
+    async def execute(self, session: AsyncSession) -> dict:
+        parliamentarians = await self._parliamentarians.list_all(session)
+        clubs = await self._clubs.list_all(session)
+        affiliated, unaffiliated = partition(parliamentarians, clubs)
+        return {
+            "parliamentarians": [parliamentarian_dict(p) for p in affiliated],
+            "unaffiliated": [parliamentarian_dict(p) for p in unaffiliated],
+        }
+
+
+class UpsertParliamentarianUseCase(_ParliamentarianUseCase):
+    """POST-as-upsert (spec #30, C7): update in place when ``id`` matches, else create."""
+
+    async def execute(
+        self, session: AsyncSession, body: ParliamentarianBody
+    ) -> dict:
+        saved = await self._parliamentarians.upsert(
+            session, body.to_parliamentarian()
+        )
+        return await self._expanded(session, saved)
+
+
+class UpdateParliamentarianUseCase(_ParliamentarianUseCase):
+    """PUT update (spec #31): 404 ``Nie znaleziono parlamentarzysty`` when the id is unknown."""
+
+    async def execute(
+        self,
+        session: AsyncSession,
+        parliamentarian_id: int,
+        body: ParliamentarianBody,
+    ) -> dict:
+        existing = await self._parliamentarians.get_by_id(
+            session, parliamentarian_id
+        )
+        if existing is None:
+            raise NotFoundError(_PARLIAMENTARIAN_NOT_FOUND)
+        saved = await self._parliamentarians.update(
+            session, body.to_parliamentarian(id=parliamentarian_id)
+        )
+        return await self._expanded(session, saved)
+
+
+class DeleteParliamentarianUseCase(_ParliamentarianUseCase):
+    """Delete + unlink from club (spec #32): 404 when unknown, else ``{success:true}``."""
+
+    async def execute(
+        self, session: AsyncSession, parliamentarian_id: int
+    ) -> dict:
+        deleted = await self._parliamentarians.delete(session, parliamentarian_id)
+        if not deleted:
+            raise NotFoundError(_PARLIAMENTARIAN_NOT_FOUND)
+        return {"success": True}
+
+
+# --- clubs -----------------------------------------------------------------
+
+
+class ListClubsUseCase:
+    """All clubs as a **bare array** (spec #33, C10); ``members:[]``."""
+
+    def __init__(self, clubs: ClubRepository) -> None:
+        self._clubs = clubs
+
+    async def execute(self, session: AsyncSession) -> list[dict]:
+        clubs = await self._clubs.list_all(session)
+        return [club_dict(c) for c in clubs]
+
+
+class CreateClubUseCase:
+    """Create a club (spec #34): 201 ``<Club>`` with ``id`` and ``members:[]``."""
+
+    def __init__(self, clubs: ClubRepository) -> None:
+        self._clubs = clubs
+
+    async def execute(self, session: AsyncSession, body: ClubBody) -> dict:
+        created = await self._clubs.add(session, body.to_club())
+        return club_dict(created)
+
+
+class UpdateClubUseCase:
+    """Update a club (spec #35): 404 ``Nie znaleziono klubu`` when the id is unknown."""
+
+    def __init__(self, clubs: ClubRepository) -> None:
+        self._clubs = clubs
+
+    async def execute(
+        self, session: AsyncSession, club_id: int, body: ClubBody
+    ) -> dict:
+        existing = await self._clubs.get_by_id(session, club_id)
+        if existing is None:
+            raise NotFoundError(_CLUB_NOT_FOUND)
+        updated = await self._clubs.update(session, body.to_club(id=club_id))
+        return club_dict(updated)
+
+
+class DeleteClubUseCase:
+    """Delete a club and unlink its members (spec #36): 404 when unknown, else ``{success:true}``."""
+
+    def __init__(self, clubs: ClubRepository) -> None:
+        self._clubs = clubs
+
+    async def execute(self, session: AsyncSession, club_id: int) -> dict:
+        deleted = await self._clubs.delete(session, club_id)
+        if not deleted:
+            raise NotFoundError(_CLUB_NOT_FOUND)
+        return {"success": True}
+
+
+
+═══════════════════════════════════════════════════════════════
+FILE: src\mparlament\slices\resolutions\application\use_cases.py
+═══════════════════════════════════════════════════════════════
+
+"""Application use cases for the resolutions slice (doc 06).
+
+Read/write orchestration over the domain ports; the projections live in ``views.py`` and identity
+is resolved in the router (C2), so these stay unit-testable without FastAPI. Signature counts are
+kept in sync with the rows on every sign/unsign (the ``signatures`` scalar the FE reads).
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from mparlament.shared.domain import ConflictError, NotFoundError
+from mparlament.slices.resolutions.application.dtos import ResolutionCreateData
+from mparlament.slices.resolutions.application.views import (
+    current_user_block,
+    resolution_dict,
+    signed_user,
+)
+from mparlament.slices.resolutions.domain.entities import (
+    AUTHOR,
+    SIGNATURE,
+    Resolution,
+    ResolutionSignature,
+    slugify,
+)
+from mparlament.slices.resolutions.domain.ports import (
+    ResolutionRepository,
+    SessionLookup,
+    SignatureRepository,
+    UserDirectory,
+)
+from mparlament.slices.resolutions.domain.services import resolve_resolution
+
+_NOT_FOUND = "Nie znaleziono uchwaĹ‚y"
+_ALREADY_SIGNED = "JuĹĽ podpisaĹ‚eĹ› tÄ™ uchwaĹ‚Ä™"
+_NO_SIGNATURE = "Nie znaleziono podpisu"
+_SIGNATURE_REMOVED = "Podpis zostaĹ‚ usuniÄ™ty"
+
+
+def _today() -> str:
+    return dt.date.today().isoformat()  # "YYYY-MM-DD" (C13)
+
+
+def _now_iso() -> str:
+    return dt.datetime.now(tz=dt.timezone.utc).isoformat()
+
+
+class _ResolutionUseCase:
+    """Shared wiring for the read/write collaborators."""
+
+    def __init__(
+        self,
+        resolutions: ResolutionRepository,
+        signatures: SignatureRepository,
+        directory: UserDirectory,
+        sessions: SessionLookup,
+    ) -> None:
+        self._resolutions = resolutions
+        self._signatures = signatures
+        self._directory = directory
+        self._sessions = sessions
+
+    async def _refresh_count(
+        self, session: AsyncSession, resolution: Resolution
+    ) -> Resolution:
+        """Recompute ``signatures`` from the rows and persist (keeps the FE scalar in sync)."""
+        rows = await self._signatures.list_by_resolution(session, resolution.id)
+        resolution.signatures = len(rows)
+        return await self._resolutions.update(session, resolution)
+
+
+class ListResolutionsUseCase(_ResolutionUseCase):
+    """All resolutions wrapped as ``{resolutions: [...]}`` (spec #17, C10)."""
+
+    async def execute(self, session: AsyncSession) -> dict:
+        resolutions = await self._resolutions.list_all(session)
+        return {"resolutions": [resolution_dict(r) for r in resolutions]}
+
+
+class GetResolutionUseCase(_ResolutionUseCase):
+    """Resolution detail (spec #18/#18b): ``{resolution, signedUsers, session, currentUser?}``.
+
+    ``param`` is polymorphic (slug or id, C5); ``currentUser`` is included only when identity is
+    known (``requester_id`` not ``None``, C2). 404 â†’ ``Nie znaleziono uchwaĹ‚y``.
+    """
+
+    async def execute(
+        self, session: AsyncSession, param: str, requester_id: int | None
+    ) -> dict:
+        resolution = await resolve_resolution(session, param, self._resolutions)
+        if resolution is None:
+            raise NotFoundError(_NOT_FOUND)
+
+        signatures = await self._signatures.list_by_resolution(session, resolution.id)
+        users = await self._directory.list_all(session)
+        users_by_id = {u.id: u for u in users}
+        session_info = await self._sessions.get(session, resolution.sessionId)
+
+        body: dict = {
+            "resolution": resolution_dict(resolution),
+            "signedUsers": [signed_user(s, users_by_id) for s in signatures],
+            "session": (
+                {"city": session_info.city, "date": session_info.date}
+                if session_info
+                else None
+            ),
+        }
+        if requester_id is not None:
+            body["currentUser"] = current_user_block(
+                resolution, signatures, requester_id
+            )
+        return body
+
+
+class CreateResolutionUseCase(_ResolutionUseCase):
+    """Persist a new resolution from the multipart body (#19): slug, pending, author auto-sign."""
+
+    def __init__(
+        self,
+        resolutions: ResolutionRepository,
+        signatures: SignatureRepository,
+        directory: UserDirectory,
+        sessions: SessionLookup,
+        storage,
+    ) -> None:
+        super().__init__(resolutions, signatures, directory, sessions)
+        self._storage = storage
+
+    async def execute(
+        self,
+        session: AsyncSession,
+        file_bytes: bytes,
+        upload_name: str | None,
+        data_json: str | bytes | None,
+    ) -> dict:
+        data = ResolutionCreateData.parse(data_json)
+
+        # Slug is deterministic + collision-safe against the slugs already in use (C12).
+        taken = {r.slug for r in await self._resolutions.list_all(session)}
+        file_name = data.fileName or upload_name
+
+        file_path = None
+        if file_name is not None:
+            file_path = await self._storage.save("resolutions", file_name, file_bytes)
+
+        resolution = Resolution(
+            **data.as_kwargs(),
+            slug=slugify(data.title, taken),
+            signatures=1,
+            status="pending",
+            createdAt=_today(),
+            filePath=file_path,
+        )
+        resolution.fileName = file_name
+        created = await self._resolutions.add(session, resolution)
+
+        # Author auto-signature (spec Â§2 ResolutionSignature; type="author").
+        if created.authorId is not None:
+            await self._signatures.add(
+                session,
+                ResolutionSignature(
+                    resolutionId=created.id,
+                    userId=created.authorId,
+                    timestamp=_now_iso(),
+                    type=AUTHOR,
+                ),
+            )
+        return resolution_dict(created)
+
+
+class SignResolutionUseCase(_ResolutionUseCase):
+    """A member signs a resolution (spec #21): single-signature, count kept in sync."""
+
+    async def execute(
+        self, session: AsyncSession, resolution_id: int, user_id: int
+    ) -> dict:
+        resolution = await self._resolutions.get_by_id(session, resolution_id)
+        if resolution is None:
+            raise NotFoundError(_NOT_FOUND)
+        if await self._signatures.get(session, resolution_id, user_id) is not None:
+            raise ConflictError(_ALREADY_SIGNED)
+        await self._signatures.add(
+            session,
+            ResolutionSignature(
+                resolutionId=resolution_id,
+                userId=user_id,
+                timestamp=_now_iso(),
+                type=SIGNATURE,
+            ),
+        )
+        await self._refresh_count(session, resolution)
+        return {"success": True}
+
+
+class UnsignResolutionUseCase(_ResolutionUseCase):
+    """Remove a signer's signature (spec #22): author-protected; count kept in sync."""
+
+    async def execute(
+        self, session: AsyncSession, resolution_id: int, user_id: int
+    ) -> dict:
+        resolution = await self._resolutions.get_by_id(session, resolution_id)
+        if resolution is None:
+            raise NotFoundError(_NOT_FOUND)
+        signature = await self._signatures.get(session, resolution_id, user_id)
+        if signature is None:
+            raise NotFoundError(_NO_SIGNATURE)
+        signature.ensure_removable()  # 403 for the author's auto-signature (C11)
+        await self._signatures.remove(session, signature)
+        await self._refresh_count(session, resolution)
+        return {"success": True, "message": _SIGNATURE_REMOVED}
+
+
+class ListSessionResolutionsUseCase(_ResolutionUseCase):
+    """Resolutions of one session (spec #20): ``{resolutions, sessionId, count}``."""
+
+    async def execute(self, session: AsyncSession, session_id: int) -> dict:
+        resolutions = await self._resolutions.list_by_session(session, session_id)
+        views = [resolution_dict(r) for r in resolutions]
+        return {"resolutions": views, "sessionId": session_id, "count": len(views)}
+
+
+
+═══════════════════════════════════════════════════════════════
+FILE: src\mparlament\slices\resolutions\infrastructure\models.py
+═══════════════════════════════════════════════════════════════
+
+"""SQLAlchemy models for the resolutions slice.
+
+- ``resolutions`` â€” scalar columns plus a JSON ``chapters`` column (document-shaped; matches the
+  FE's reads/writes and avoids over-normalizing chapters/articles â€” KISS/YAGNI). ``slug`` carries a
+  unique index (C12). ``signatures`` keeps the FE-facing scalar count in sync with the rows.
+- ``resolution_signatures`` â€” one row per signature with a **unique (resolution_id, user_id)**
+  constraint enforcing the single-signature rule at the DB level (the application check is the fast
+  path; this is the backstop). ``type`` â {author, signature}.
+
+Registered on ``Base.metadata`` via ``shared.models_registry`` so create_all/Alembic see them.
+"""
+
+from __future__ import annotations
+
+from sqlalchemy import JSON, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column
+
+from mparlament.shared.db import Base
+
+
+class ResolutionModel(Base):
+    __tablename__ = "resolutions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    title: Mapped[str] = mapped_column(String, default="")
+    slug: Mapped[str] = mapped_column(String, unique=True, index=True)
+    file_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    author_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    author: Mapped[str] = mapped_column(String, default="")
+    party: Mapped[str | None] = mapped_column(String, nullable=True)
+    session_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    preamble: Mapped[str | None] = mapped_column(String, nullable=True)
+    chapters: Mapped[list] = mapped_column(JSON, default=list)
+    signatures: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String, default="pending")
+    created_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    file_path: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class ResolutionSignatureModel(Base):
+    __tablename__ = "resolution_signatures"
+    __table_args__ = (
+        UniqueConstraint(
+            "resolution_id", "user_id", name="uq_resolution_signatures_resolution_user"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    resolution_id: Mapped[int] = mapped_column(
+        ForeignKey("resolutions.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    timestamp: Mapped[str] = mapped_column(String)
+    type: Mapped[str] = mapped_column(String, default="signature")
+
+
+
+═══════════════════════════════════════════════════════════════
+FILE: src\mparlament\slices\resolutions\domain\entities.py
+═══════════════════════════════════════════════════════════════
+
+"""Resolutions-slice domain (framework-free) â€” spec Â§2 (Resolution, ResolutionSignature), Â§4.
+
+Two aggregates plus document-shaped value objects and the pure services the slice needs:
+
+- ``Resolution`` â€” the uchwaĹ‚a aggregate. Carries the persisted fields the FE reads/writes
+  (spec Â§2 Resolution). ``chapters`` is a document-shaped list of ``Chapter``/``Article`` value
+  objects (stored as JSON on the row â€” KISS/YAGNI, matches the FE's document reads/writes). Dates
+  are verbatim FE-format strings (``createdAt`` is ``YYYY-MM-DD``, C13); the domain never parses.
+- ``ResolutionSignature`` â€” a single signature ``{id, resolutionId, userId, timestamp, type}``.
+  The author is auto-signed on create (``type="author"``) and cannot remove their signature
+  (``ensure_removable`` guards this, C11); every other signer is ``type="signature"``.
+
+``slugify`` is the single source of truth for slug generation (C12): lowercase, spaces â†’ ``-``,
+strip characters outside ``[\\w-]`` (Polish word chars survive), collision â†’ ``-2``, ``-3``, â€¦.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from typing import Iterable
+
+from mparlament.shared.domain import PermissionDeniedError
+
+AUTHOR = "author"
+SIGNATURE = "signature"
+
+_AUTHOR_CANNOT_UNSIGN = "Autor nie moĹĽe usunÄ…Ä‡ podpisu"
+
+
+# --- slug generation (C12) -------------------------------------------------
+
+
+def slugify(title: str, taken: Iterable[str] = ()) -> str:
+    """Slug per C12: lowercase, spaces â†’ ``-``, drop non-``[\\w-]``; collision â†’ ``-2``, ``-3``, â€¦.
+
+    ``\\w`` is unicode-aware, so Polish letters (Ä…, Ĺ‚, ĹĽâ€¦) are preserved. ``taken`` is the set of
+    slugs already in use; the returned slug is guaranteed not to collide with it.
+    """
+    base = title.strip().lower()
+    base = re.sub(r"\s+", "-", base)
+    base = re.sub(r"[^\w-]", "", base)
+    base = re.sub(r"-{2,}", "-", base).strip("-") or "uchwala"
+
+    taken_set = set(taken)
+    if base not in taken_set:
+        return base
+    n = 2
+    while f"{base}-{n}" in taken_set:
+        n += 1
+    return f"{base}-{n}"
+
+
+# --- value objects ---------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Article:
+    """A single article within a chapter (spec Â§2 Resolution.chapters[].articles[])."""
+
+    id: str | int | None = None
+    number: str | int | None = None
+    content: str = ""
+
+
+@dataclass(frozen=True)
+class Chapter:
+    """A chapter grouping articles (spec Â§2 Resolution.chapters[])."""
+
+    id: str | int | None = None
+    title: str = ""
+    articles: list[Article] = field(default_factory=list)
+
+
+def _to_article(value: object) -> Article:
+    if isinstance(value, Article):
+        return value
+    return Article(**dict(value))  # type: ignore[arg-type]
+
+
+def _to_chapter(value: object) -> Chapter:
+    if isinstance(value, Chapter):
+        return value
+    data = dict(value)  # type: ignore[arg-type]
+    articles = [_to_article(a) for a in (data.get("articles") or [])]
+    return Chapter(id=data.get("id"), title=data.get("title", ""), articles=articles)
+
+
+# --- entities --------------------------------------------------------------
+
+
+@dataclass
+class Resolution:
+    """The uchwaĹ‚a aggregate (spec Â§2 Resolution). Statuses: pending|accepted|rejected."""
+
+    id: int | None = None
+    title: str = ""
+    slug: str = ""
+    fileName: str | None = None
+    authorId: int | None = None
+    author: str = ""
+    party: str | None = None
+    sessionId: int | None = None
+    preamble: str | None = None
+    chapters: list = field(default_factory=list)
+    signatures: int = 0
+    status: str = "pending"  # pending|accepted|rejected
+    createdAt: str | None = None  # "YYYY-MM-DD" (C13)
+    filePath: str | None = None
+
+    def __post_init__(self) -> None:
+        self.chapters = [_to_chapter(c) for c in self.chapters]
+
+    def is_author(self, user_id: int | None) -> bool:
+        return user_id is not None and self.authorId == user_id
+
+
+@dataclass
+class ResolutionSignature:
+    """A single signature row (spec Â§2 ResolutionSignature). ``type`` â {author, signature}."""
+
+    resolutionId: int
+    userId: int
+    timestamp: str
+    type: str = SIGNATURE
+    id: int | None = None
+
+    def ensure_removable(self) -> None:
+        """Author-protection (C11): the auto author-signature cannot be removed â†’ 403."""
+        if self.type == AUTHOR:
+            raise PermissionDeniedError(_AUTHOR_CANNOT_UNSIGN)
+
+
+

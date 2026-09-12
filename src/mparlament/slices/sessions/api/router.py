@@ -16,20 +16,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from mparlament.shared.auth import User as IdentityUser
 from mparlament.shared.auth import current_user, require_admin_or_marshal
 from mparlament.shared.db import get_session
+from mparlament.shared.domain import NotFoundError
 from mparlament.shared.realtime import deferred_event_publisher
 from mparlament.slices.sessions.application.dtos import (
     AddSpeakerInput,
     CurrentSessionDTO,
     SessionListDTO,
+    SetSpeakerStatusInput,
     SpeakerDTO,
     UpdateCurrentSessionInput,
+    UpdateSpeakerInput,
 )
 from mparlament.slices.sessions.application.use_cases import (
     AddSpeakerUseCase,
+    DeleteSpeakerUseCase,
     GetCurrentSessionUseCase,
     ListSessionsUseCase,
     ListSpeakersUseCase,
+    SetSpeakerStatusUseCase,
     UpdateCurrentSessionUseCase,
+    UpdateSpeakerUseCase,
 )
 from mparlament.slices.sessions.infrastructure.repository import (
     SqlAlchemyCurrentSessionRepository,
@@ -48,6 +54,9 @@ _update_current = UpdateCurrentSessionUseCase(_current_repo, deferred_event_publ
 _list_sessions = ListSessionsUseCase(_session_repo)
 _list_speakers = ListSpeakersUseCase(_speaker_repo)
 _add_speaker = AddSpeakerUseCase(_speaker_repo, deferred_event_publisher)
+_update_speaker = UpdateSpeakerUseCase(_speaker_repo)
+_delete_speaker = DeleteSpeakerUseCase(_speaker_repo)
+_set_speaker_status = SetSpeakerStatusUseCase(_speaker_repo)
 
 
 @router.get("/session/current", response_model=CurrentSessionDTO)
@@ -100,3 +109,64 @@ async def add_speaker(
         session, payload.name, payload.club, payload.role
     )
     return SpeakerDTO.model_validate(speaker)
+
+
+# --- speaker CRUD (#41) -----------------------------------------------------
+
+
+@router.put("/speakers/{speaker_id}", response_model=SpeakerDTO)
+async def update_speaker(
+    speaker_id: int,
+    payload: UpdateSpeakerInput,
+    _: IdentityUser = Depends(require_admin_or_marshal),
+    session: AsyncSession = Depends(get_session),
+) -> SpeakerDTO:
+    speaker = await _update_speaker.execute(
+        session,
+        speaker_id,
+        payload.name,
+        payload.club,
+        payload.role,
+        payload.status,
+    )
+    return SpeakerDTO.model_validate(speaker)
+
+
+@router.put("/speakers", response_model=SpeakerDTO)
+async def update_speaker_no_url(
+    payload: UpdateSpeakerInput,
+    _: IdentityUser = Depends(require_admin_or_marshal),
+    session: AsyncSession = Depends(get_session),
+) -> SpeakerDTO:
+    """FE-friendly variant (SessionDetails.jsx calls PUT /api/speakers with id in body)."""
+    if payload.id is None:
+        raise NotFoundError("Brak id mówcy")
+    speaker = await _update_speaker.execute(
+        session,
+        payload.id,
+        payload.name,
+        payload.club,
+        payload.role,
+        payload.status,
+    )
+    return SpeakerDTO.model_validate(speaker)
+
+
+@router.patch("/speakers/{speaker_id}/status", response_model=SpeakerDTO)
+async def set_speaker_status(
+    speaker_id: int,
+    payload: SetSpeakerStatusInput,
+    _: IdentityUser = Depends(require_admin_or_marshal),
+    session: AsyncSession = Depends(get_session),
+) -> SpeakerDTO:
+    speaker = await _set_speaker_status.execute(session, speaker_id, payload.status)
+    return SpeakerDTO.model_validate(speaker)
+
+
+@router.delete("/speakers/{speaker_id}")
+async def delete_speaker(
+    speaker_id: int,
+    _: IdentityUser = Depends(require_admin_or_marshal),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    return await _delete_speaker.execute(session, speaker_id)

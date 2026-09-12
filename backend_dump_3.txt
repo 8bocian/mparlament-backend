@@ -1,0 +1,737 @@
+﻿
+═══ FILE: src\mparlament\slices\sessions\infrastructure\repository.py ═══
+"""SQLAlchemy adapters implementing the sessions domain ports."""
+
+from __future__ import annotations
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from mparlament.slices.sessions.domain.entities import (
+    CurrentSession,
+    Session,
+    Speaker,
+)
+from mparlament.slices.sessions.infrastructure.mappers import (
+    apply_current,
+    to_current,
+    to_session,
+    to_speaker,
+)
+from mparlament.slices.sessions.infrastructure.models import (
+    CurrentSessionModel,
+    SessionModel,
+    SpeakerModel,
+)
+
+_CURRENT_ID = 1  # the singleton live-session row (C6)
+
+
+class SqlAlchemyCurrentSessionRepository:
+    """Loads/persists the singleton live session."""
+
+    async def get(self, session: AsyncSession) -> CurrentSession | None:
+        row = await session.get(CurrentSessionModel, _CURRENT_ID)
+        return to_current(row) if row else None
+
+    async def save(
+        self, session: AsyncSession, current: CurrentSession
+    ) -> CurrentSession:
+        row = await session.get(CurrentSessionModel, _CURRENT_ID)
+        if row is None:
+            row = CurrentSessionModel(id=_CURRENT_ID)
+            session.add(row)
+        apply_current(row, current)
+        await session.flush()
+        return to_current(row)
+
+
+class SqlAlchemySessionRepository:
+    """Lists the session-list rows (#7)."""
+
+    async def list_all(self, session: AsyncSession) -> list[Session]:
+        result = await session.execute(select(SessionModel).order_by(SessionModel.id))
+        return [to_session(row) for row in result.scalars().all()]
+
+
+class SqlAlchemySpeakerRepository:
+    """Lists/adds speaker-registry rows (#39/#40)."""
+
+    async def list_all(self, session: AsyncSession) -> list[Speaker]:
+        result = await session.execute(select(SpeakerModel).order_by(SpeakerModel.id))
+        return [to_speaker(row) for row in result.scalars().all()]
+
+    async def add(self, session: AsyncSession, speaker: Speaker) -> Speaker:
+        row = SpeakerModel(name=speaker.name, club=speaker.club, role=speaker.role)
+        session.add(row)
+        await session.flush()
+        return to_speaker(row)
+
+
+═══ FILE: src\mparlament\slices\sessions\domain\ports.py ═══
+"""Domain ports for the sessions slice (dependency inversion).
+
+The application layer depends on these Protocols; SQLAlchemy adapters live in ``infrastructure``.
+v1 keeps a single live-session row (C6 / KISS), so ``CurrentSessionRepository`` is get/save on a
+singleton; ``SessionRepository`` lists the sitting rows (#7); ``SpeakerRepository`` lists/adds the
+speaker registry (#39/#40).
+"""
+
+from __future__ import annotations
+
+from typing import Protocol, runtime_checkable
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from mparlament.slices.sessions.domain.entities import (
+    CurrentSession,
+    Session,
+    Speaker,
+)
+
+
+@runtime_checkable
+class CurrentSessionRepository(Protocol):
+    """Persistence port for the singleton live session."""
+
+    async def get(self, session: AsyncSession) -> CurrentSession | None: ...
+
+    async def save(
+        self, session: AsyncSession, current: CurrentSession
+    ) -> CurrentSession: ...
+
+
+@runtime_checkable
+class SessionRepository(Protocol):
+    """Read port for the session-list rows (#7)."""
+
+    async def list_all(self, session: AsyncSession) -> list[Session]: ...
+
+
+@runtime_checkable
+class SpeakerRepository(Protocol):
+    """Persistence port for the speaker registry (#39/#40)."""
+
+    async def list_all(self, session: AsyncSession) -> list[Speaker]: ...
+
+    async def add(self, session: AsyncSession, speaker: Speaker) -> Speaker: ...
+
+
+═══ FILE: src\mparlament\slices\sessions\application\dtos.py ═══
+"""Pydantic DTOs for the sessions slice (shapes verbatim from BACKEND_SPEC.md Â§4).
+
+``CurrentSessionDTO`` serializes the full C6 superset (both aliases return it identically).
+``UpdateCurrentSessionInput`` is an all-optional patch: the router reads only the keys the FE
+actually sent (``model_dump(exclude_unset=True)``) so the merge stays partial (spec #5).
+``SessionListDTO`` is the ``{id, name, date, city}`` list row (#7); ``SpeakerDTO`` /
+``AddSpeakerInput`` cover the speaker registry (#39/#40).
+"""
+
+from __future__ import annotations
+
+from pydantic import BaseModel, ConfigDict
+
+
+class CurrentSpeakerDTO(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    name: str
+    club: str | None = None
+    role: str | None = None
+    time: str | None = None
+
+
+class AgendaPointDTO(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    number: str | None = None
+    title: str | None = None
+    type: str | None = None
+
+
+class ScheduleItemDTO(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    time: str | None = None
+    title: str | None = None
+    status: str = "waiting"
+
+
+class CurrentSessionDTO(BaseModel):
+    """The live-session superset object (spec Â§2 CurrentSession, C6)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    title: str
+    status: str
+    active: bool
+    date: str | None = None
+    start: str | None = None
+    startTime: str | None = None
+    end: str | None = None
+    endTime: str | None = None
+    currentSpeaker: CurrentSpeakerDTO | None = None
+    currentPoint: AgendaPointDTO | None = None
+    schedule: list[ScheduleItemDTO] = []
+    zoContent: str = ""
+
+
+class UpdateCurrentSessionInput(BaseModel):
+    """Partial PUT body (spec #5). All optional; only sent keys are merged."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    title: str | None = None
+    status: str | None = None
+    active: bool | None = None
+    date: str | None = None
+    start: str | None = None
+    startTime: str | None = None
+    end: str | None = None
+    endTime: str | None = None
+    currentSpeaker: CurrentSpeakerDTO | None = None
+    currentPoint: AgendaPointDTO | None = None
+    schedule: list[ScheduleItemDTO] | None = None
+    zoContent: str | None = None
+
+
+class SessionListDTO(BaseModel):
+    """A session-list row (spec Â§2 Session, #7)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    date: str | None = None
+    city: str | None = None
+
+
+class SpeakerDTO(BaseModel):
+    """Speaker registry row (#39/#40)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int | None = None
+    name: str
+    club: str | None = None
+    role: str | None = None
+
+
+class AddSpeakerInput(BaseModel):
+    """``POST /api/speakers`` body (#40)."""
+
+    name: str
+    club: str | None = None
+    role: str | None = None
+
+
+═══ FILE: src\mparlament\slices\resolutions\domain\ports.py ═══
+"""Domain ports for the resolutions slice (dependency inversion).
+
+The application layer depends on these Protocols; SQLAlchemy adapters live in ``infrastructure``.
+
+- ``ResolutionRepository`` â€” CRUD + slug/id/session lookups on the ``Resolution`` aggregate.
+- ``SignatureRepository`` â€” append/remove signatures, look one up, list a resolution's signatures.
+  The unique ``(resolution_id, user_id)`` constraint is the DB-level single-signature backstop;
+  ``get`` is the fast application check.
+- ``UserDirectory`` â€” lists the ``User`` collection as ``DirectoryUser`` so ``signedUsers`` can be
+  expanded to ``{name, club}`` without importing another slice's ORM (loose coupling, C9).
+- ``SessionLookup`` â€” resolves a resolution's ``sessionId`` to its ``{city, date}`` block (C10),
+  degrading to ``None`` when the sessions slice has no such row.
+
+``resolve_resolution`` (in ``domain.services``) is the shared slug-or-id helper (C5).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Protocol, runtime_checkable
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from mparlament.slices.resolutions.domain.entities import (
+    Resolution,
+    ResolutionSignature,
+)
+
+
+@dataclass(frozen=True)
+class DirectoryUser:
+    """A ``User`` as ``signedUsers`` reads them (``{name, club}``) keyed by ``id``."""
+
+    id: int
+    name: str
+    club: str | None = None
+
+
+@dataclass(frozen=True)
+class SessionInfo:
+    """The ``{city, date}`` session block the FE reads on a resolution detail (C10)."""
+
+    city: str | None = None
+    date: str | None = None
+
+
+@runtime_checkable
+class ResolutionRepository(Protocol):
+    """Persistence port for the ``Resolution`` aggregate (#17-#20, cascade)."""
+
+    async def get_by_id(
+        self, session: AsyncSession, resolution_id: int
+    ) -> Resolution | None: ...
+
+    async def get_by_slug(
+        self, session: AsyncSession, slug: str
+    ) -> Resolution | None: ...
+
+    async def list_all(self, session: AsyncSession) -> list[Resolution]: ...
+
+    async def list_by_session(
+        self, session: AsyncSession, session_id: int
+    ) -> list[Resolution]: ...
+
+    async def add(self, session: AsyncSession, resolution: Resolution) -> Resolution: ...
+
+    async def update(
+        self, session: AsyncSession, resolution: Resolution
+    ) -> Resolution: ...
+
+
+@runtime_checkable
+class SignatureRepository(Protocol):
+    """Persistence port for resolution signatures (#21/#22, author auto-sign)."""
+
+    async def add(
+        self, session: AsyncSession, signature: ResolutionSignature
+    ) -> ResolutionSignature: ...
+
+    async def remove(
+        self, session: AsyncSession, signature: ResolutionSignature
+    ) -> None: ...
+
+    async def get(
+        self, session: AsyncSession, resolution_id: int, user_id: int
+    ) -> ResolutionSignature | None: ...
+
+    async def list_by_resolution(
+        self, session: AsyncSession, resolution_id: int
+    ) -> list[ResolutionSignature]: ...
+
+
+@runtime_checkable
+class UserDirectory(Protocol):
+    """Lists the ``User`` collection for ``signedUsers`` expansion (C9)."""
+
+    async def list_all(self, session: AsyncSession) -> list[DirectoryUser]: ...
+
+
+@runtime_checkable
+class SessionLookup(Protocol):
+    """Resolves a ``sessionId`` to its ``{city, date}`` block (C10); ``None`` when absent."""
+
+    async def get(
+        self, session: AsyncSession, session_id: int | None
+    ) -> SessionInfo | None: ...
+
+
+═══ FILE: src\mparlament\slices\resolutions\infrastructure\repository.py ═══
+"""SQLAlchemy adapters implementing the resolutions domain ports.
+
+``SqlAlchemyUserDirectory`` / ``SqlAlchemySessionLookup`` reuse doc 02's ``UserModel`` and doc 04's
+``SessionModel`` reads to expand ``signedUsers`` and the ``{city, date}`` block â€” the resolutions
+slice depends on those shared collections by projecting the rows directly (loose coupling, C9),
+never importing another slice's domain.
+
+``ResolutionLinkedItemStatusUpdater`` is the cascade adapter the votings archive (#14) drives: it
+structurally satisfies votings' ``LinkedItemStatusUpdater`` port (``update_status``) and flips a
+resolution's ``status`` to accepted/rejected by id, degrading to a no-op when the target is absent.
+"""
+
+from __future__ import annotations
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from mparlament.slices.auth_identity.infrastructure.models import UserModel
+from mparlament.slices.resolutions.domain.entities import (
+    Resolution,
+    ResolutionSignature,
+)
+from mparlament.slices.resolutions.domain.ports import DirectoryUser, SessionInfo
+from mparlament.slices.resolutions.infrastructure.mappers import (
+    apply_resolution,
+    to_resolution,
+    to_signature,
+)
+from mparlament.slices.resolutions.infrastructure.models import (
+    ResolutionModel,
+    ResolutionSignatureModel,
+)
+from mparlament.slices.sessions.infrastructure.models import SessionModel
+
+
+class SqlAlchemyResolutionRepository:
+    """CRUD + slug/id/session lookups on the ``Resolution`` aggregate (#17-#20)."""
+
+    async def get_by_id(
+        self, session: AsyncSession, resolution_id: int
+    ) -> Resolution | None:
+        row = await session.get(ResolutionModel, resolution_id)
+        return to_resolution(row) if row else None
+
+    async def get_by_slug(
+        self, session: AsyncSession, slug: str
+    ) -> Resolution | None:
+        result = await session.execute(
+            select(ResolutionModel).where(ResolutionModel.slug == slug)
+        )
+        row = result.scalar_one_or_none()
+        return to_resolution(row) if row else None
+
+    async def list_all(self, session: AsyncSession) -> list[Resolution]:
+        result = await session.execute(
+            select(ResolutionModel).order_by(ResolutionModel.id)
+        )
+        return [to_resolution(row) for row in result.scalars().all()]
+
+    async def list_by_session(
+        self, session: AsyncSession, session_id: int
+    ) -> list[Resolution]:
+        result = await session.execute(
+            select(ResolutionModel)
+            .where(ResolutionModel.session_id == session_id)
+            .order_by(ResolutionModel.id)
+        )
+        return [to_resolution(row) for row in result.scalars().all()]
+
+    async def add(self, session: AsyncSession, resolution: Resolution) -> Resolution:
+        row = ResolutionModel()
+        apply_resolution(row, resolution)
+        session.add(row)
+        await session.flush()
+        return to_resolution(row)
+
+    async def update(
+        self, session: AsyncSession, resolution: Resolution
+    ) -> Resolution:
+        row = await session.get(ResolutionModel, resolution.id)
+        if row is None:
+            raise KeyError(resolution.id)
+        apply_resolution(row, resolution)
+        await session.flush()
+        return to_resolution(row)
+
+
+class SqlAlchemySignatureRepository:
+    """Append/remove/look up signature rows (#21/#22, author auto-sign)."""
+
+    async def add(
+        self, session: AsyncSession, signature: ResolutionSignature
+    ) -> ResolutionSignature:
+        row = ResolutionSignatureModel(
+            resolution_id=signature.resolutionId,
+            user_id=signature.userId,
+            timestamp=signature.timestamp,
+            type=signature.type,
+        )
+        session.add(row)
+        await session.flush()
+        return to_signature(row)
+
+    async def remove(
+        self, session: AsyncSession, signature: ResolutionSignature
+    ) -> None:
+        row = await session.get(ResolutionSignatureModel, signature.id)
+        if row is not None:
+            await session.delete(row)
+            await session.flush()
+
+    async def get(
+        self, session: AsyncSession, resolution_id: int, user_id: int
+    ) -> ResolutionSignature | None:
+        result = await session.execute(
+            select(ResolutionSignatureModel).where(
+                ResolutionSignatureModel.resolution_id == resolution_id,
+                ResolutionSignatureModel.user_id == user_id,
+            )
+        )
+        row = result.scalar_one_or_none()
+        return to_signature(row) if row else None
+
+    async def list_by_resolution(
+        self, session: AsyncSession, resolution_id: int
+    ) -> list[ResolutionSignature]:
+        result = await session.execute(
+            select(ResolutionSignatureModel)
+            .where(ResolutionSignatureModel.resolution_id == resolution_id)
+            .order_by(ResolutionSignatureModel.id)
+        )
+        return [to_signature(row) for row in result.scalars().all()]
+
+
+class SqlAlchemyUserDirectory:
+    """Lists the ``User`` collection as ``DirectoryUser`` for ``signedUsers`` expansion (C9)."""
+
+    async def list_all(self, session: AsyncSession) -> list[DirectoryUser]:
+        result = await session.execute(select(UserModel).order_by(UserModel.id))
+        return [
+            DirectoryUser(id=row.id, name=row.name, club=row.club)
+            for row in result.scalars().all()
+        ]
+
+
+class SqlAlchemySessionLookup:
+    """Resolves a ``sessionId`` to its ``{city, date}`` block (C10); ``None`` when absent."""
+
+    async def get(
+        self, session: AsyncSession, session_id: int | None
+    ) -> SessionInfo | None:
+        if session_id is None:
+            return None
+        row = await session.get(SessionModel, session_id)
+        if row is None:
+            return None
+        return SessionInfo(city=row.city, date=row.date)
+
+
+class ResolutionLinkedItemStatusUpdater:
+    """Cascade adapter for the votings archive (#14): flip a resolution's ``status`` by id.
+
+    Structurally satisfies votings' ``LinkedItemStatusUpdater`` port. Ignores non-resolution
+    targets and missing rows so the cascade degrades gracefully (README loose coupling).
+    """
+
+    def __init__(self, repo: SqlAlchemyResolutionRepository | None = None) -> None:
+        self._repo = repo or SqlAlchemyResolutionRepository()
+
+    async def update_status(
+        self,
+        session: AsyncSession,
+        item_type: str,
+        item_id: str | None,
+        status: str,
+    ) -> None:
+        if item_type != "resolution" or item_id is None:
+            return
+        try:
+            resolution_id = int(item_id)
+        except (TypeError, ValueError):
+            return
+        resolution = await self._repo.get_by_id(session, resolution_id)
+        if resolution is None:
+            return
+        resolution.status = status
+        await self._repo.update(session, resolution)
+
+
+═══ FILE: src\mparlament\slices\amendments\application\views.py ═══
+"""Read-time projection of an ``Amendment`` into the FE-facing shape (spec Â§2, Â§4, C10).
+
+``amendment_dict`` is the bare ``Amendment`` object the FE reads everywhere (list, detail, create
+and withdraw responses). ``changes`` is emitted as plain dicts; a ``Change`` with ``type=None``
+still carries the key (the FE tolerates a null ``type``).
+"""
+
+from __future__ import annotations
+
+from dataclasses import asdict
+
+from mparlament.slices.amendments.domain.entities import Amendment
+
+
+def amendment_dict(amendment: Amendment) -> dict:
+    """The ``Amendment`` object the FE reads (spec Â§2 Amendment), ``changes`` included."""
+    return {
+        "id": amendment.id,
+        "resolutionId": amendment.resolutionId,
+        "author": amendment.author,
+        "authorId": amendment.authorId,
+        "club": amendment.club,
+        "content": amendment.content,
+        "status": amendment.status,
+        "createdAt": amendment.createdAt,
+        "withdrawnReason": amendment.withdrawnReason,
+        "changes": [asdict(c) for c in amendment.changes],
+    }
+
+
+═══ FILE: src\mparlament\slices\votings\domain\ports.py ═══
+"""Domain ports for the votings slice (dependency inversion).
+
+The application layer depends on these Protocols; SQLAlchemy adapters live in ``infrastructure``.
+
+- ``VotingRepository`` â€” CRUD on the ``Voting`` aggregate.
+- ``VoteRepository`` â€” append a cast vote, look up a user's vote, list a voting's votes
+  (the read-time projection counts them). The unique ``(voting_id, user_id)`` constraint is the
+  DB-level backstop for the single-vote rule; ``get_user_vote`` is the fast application check.
+- ``UserDirectory`` â€” lists the voter collection as ``DirectoryUser`` for eligibility (C8) and the
+  ``{id,name,club}`` expansion the FE reads. Supplied by the auth/users slice so votings never
+  imports another slice's ORM (loose coupling, C9).
+- ``LinkedItemStatusUpdater`` â€” cascades a voting's archive result onto its linked
+  resolution/amendment status (accepted/rejected) **by id** (spec #14). Kept behind a port so the
+  slice degrades gracefully when the target slice is absent (a null adapter is the v1 default).
+"""
+
+from __future__ import annotations
+
+from typing import Protocol, runtime_checkable
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from mparlament.slices.votings.domain.entities import DirectoryUser, Voting, Vote
+
+
+@runtime_checkable
+class VotingRepository(Protocol):
+    """Persistence port for the ``Voting`` aggregate (#8-#11, #13, #14, #16)."""
+
+    async def get(self, session: AsyncSession, voting_id: int) -> Voting | None: ...
+
+    async def list_all(self, session: AsyncSession) -> list[Voting]: ...
+
+    async def add(self, session: AsyncSession, voting: Voting) -> Voting: ...
+
+    async def update(self, session: AsyncSession, voting: Voting) -> Voting: ...
+
+    async def delete(self, session: AsyncSession, voting_id: int) -> None: ...
+
+
+@runtime_checkable
+class VoteRepository(Protocol):
+    """Persistence port for cast votes (#12)."""
+
+    async def add(self, session: AsyncSession, vote: Vote) -> Vote: ...
+
+    async def get_user_vote(
+        self, session: AsyncSession, voting_id: int, user_id: int
+    ) -> Vote | None: ...
+
+    async def list_by_voting(
+        self, session: AsyncSession, voting_id: int
+    ) -> list[Vote]: ...
+
+
+@runtime_checkable
+class UserDirectory(Protocol):
+    """Lists the voter collection for eligibility + FE expansion (C8/C9)."""
+
+    async def list_all(self, session: AsyncSession) -> list[DirectoryUser]: ...
+
+
+@runtime_checkable
+class LinkedItemStatusUpdater(Protocol):
+    """Cascades an archived voting's result onto the linked item's status (#14)."""
+
+    async def update_status(
+        self,
+        session: AsyncSession,
+        item_type: str,
+        item_id: str | None,
+        status: str,
+    ) -> None: ...
+
+
+class NullLinkedItemStatusUpdater:
+    """v1 default: no linked slice yet, so the cascade is a graceful no-op (README loose coupling)."""
+
+    async def update_status(
+        self,
+        session: AsyncSession,
+        item_type: str,
+        item_id: str | None,
+        status: str,
+    ) -> None:
+        return None
+
+
+═══ FILE: src\mparlament\shared\auth\rbac.py ═══
+"""Role/permission guards (CONVENTIONS C3).
+
+``is_admin`` mirrors the FE rule (``role=="admin"`` or any ``MANAGE_*`` permission). Each
+``require_*`` is a FastAPI dependency that depends on :func:`current_user` and raises 403
+(``Brak uprawnieĹ„``) on denial â€” usable directly in tests by passing ``user=`` explicitly.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import Depends
+
+from mparlament.shared.auth.deps import current_user
+from mparlament.shared.auth.user import User
+from mparlament.shared.domain import PermissionDeniedError
+
+_DENIED = "Brak uprawnieĹ„"
+
+
+def is_admin(user: User) -> bool:
+    """Admin by role, or holder of any ``MANAGE_*`` permission (FE parity)."""
+    return user.role == "admin" or any(p.startswith("MANAGE_") for p in user.permissions)
+
+
+def _has(user: User, permission: str) -> bool:
+    return is_admin(user) or permission in user.permissions
+
+
+def can_manage_voting(user: User, voting: Any) -> bool:
+    """Admin / ``MANAGE_VOTINGS`` holder, or a user listed in ``voting.managers``."""
+    if is_admin(user) or "MANAGE_VOTINGS" in user.permissions:
+        return True
+    managers = getattr(voting, "managers", None) or []
+    manager_ids = {getattr(m, "id", m) for m in managers}
+    return user.id in manager_ids
+
+
+def require_authenticated(user: User = Depends(current_user)) -> User:
+    """Any authenticated user (identity already enforced by ``current_user``)."""
+    return user
+
+
+def require_manage_votings(user: User = Depends(current_user)) -> User:
+    if not _has(user, "MANAGE_VOTINGS"):
+        raise PermissionDeniedError(_DENIED)
+    return user
+
+
+def require_manage_resolutions(user: User = Depends(current_user)) -> User:
+    if not _has(user, "MANAGE_RESOLUTIONS"):
+        raise PermissionDeniedError(_DENIED)
+    return user
+
+
+def require_manage_parliamentarians(user: User = Depends(current_user)) -> User:
+    if not _has(user, "MANAGE_PARLIAMENTARIANS"):
+        raise PermissionDeniedError(_DENIED)
+    return user
+
+
+def require_admin_or_marshal(user: User = Depends(current_user)) -> User:
+    if not (is_admin(user) or user.role == "marshal"):
+        raise PermissionDeniedError(_DENIED)
+    return user
+
+
+═══ FILE: src\mparlament\shared\api\envelopes.py ═══
+"""Minimal response-envelope helpers (CONVENTIONS C10).
+
+Most wrapping is explicit per route (the FE reads exact keys), so this stays tiny â€” just the
+two shapes that recur across slices. Anything more specific belongs in the slice's router.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+
+def wrapped(key: str, value: Any) -> dict[str, Any]:
+    """``{key: value}`` â€” e.g. ``wrapped("user", user)`` -> ``{"user": ...}``."""
+    return {key: value}
+
+
+def success(**extra: Any) -> dict[str, Any]:
+    """``{"success": true, **extra}`` â€” the common mutation acknowledgement shape."""
+    return {"success": True, **extra}
+
+

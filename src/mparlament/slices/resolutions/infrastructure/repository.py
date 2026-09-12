@@ -83,6 +83,14 @@ class SqlAlchemyResolutionRepository:
         apply_resolution(row, resolution)
         await session.flush()
         return to_resolution(row)
+    
+    async def delete(self, session: AsyncSession, resolution_id: int) -> bool:
+        row = await session.get(ResolutionModel, resolution_id)
+        if row is None:
+            return False
+        await session.delete(row)
+        await session.flush()
+        return True
 
 
 class SqlAlchemySignatureRepository:

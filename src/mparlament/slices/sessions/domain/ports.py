@@ -39,8 +39,16 @@ class SessionRepository(Protocol):
 
 @runtime_checkable
 class SpeakerRepository(Protocol):
-    """Persistence port for the speaker registry (#39/#40)."""
+    """Persistence port for the speaker registry (#39/#40/#41)."""
 
     async def list_all(self, session: AsyncSession) -> list[Speaker]: ...
 
+    async def get_by_id(
+        self, session: AsyncSession, speaker_id: int
+    ) -> Speaker | None: ...
+
     async def add(self, session: AsyncSession, speaker: Speaker) -> Speaker: ...
+
+    async def update(self, session: AsyncSession, speaker: Speaker) -> Speaker: ...
+
+    async def delete(self, session: AsyncSession, speaker_id: int) -> bool: ...

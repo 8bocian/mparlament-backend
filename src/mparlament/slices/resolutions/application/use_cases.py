@@ -219,3 +219,14 @@ class ListSessionResolutionsUseCase(_ResolutionUseCase):
         resolutions = await self._resolutions.list_by_session(session, session_id)
         views = [resolution_dict(r) for r in resolutions]
         return {"resolutions": views, "sessionId": session_id, "count": len(views)}
+
+
+class DeleteResolutionUseCase(_ResolutionUseCase):
+    """Delete a resolution (#22b). DB-level cascade removes signatures + amendments."""
+
+    async def execute(self, session: AsyncSession, resolution_id: int) -> dict:
+        resolution = await self._resolutions.get_by_id(session, resolution_id)
+        if resolution is None:
+            raise NotFoundError(_NOT_FOUND)
+        await self._resolutions.delete(session, resolution_id)
+        return {"success": True, "message": "Uchwała została usunięta"}

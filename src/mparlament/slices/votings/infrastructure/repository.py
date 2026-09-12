@@ -84,6 +84,24 @@ class SqlAlchemyVoteRepository:
         )
         return [to_vote(row) for row in result.scalars().all()]
 
+    async def list_user_votes_for_amendments(
+        self, session: AsyncSession, user_id: int, amendment_ids: list[int]
+    ) -> list[Vote]:
+        """Votes cast by ``user_id`` on votings linked to any of ``amendment_ids``."""
+        if not amendment_ids:
+            return []
+        stmt = (
+            select(VoteModel)
+            .join(VotingModel, VoteModel.voting_id == VotingModel.id)
+            .where(
+                VoteModel.user_id == user_id,
+                VotingModel.linked_item_type == "amendment",
+                VotingModel.linked_item_id.in_([str(i) for i in amendment_ids]),
+            )
+        )
+        result = await session.execute(stmt)
+        return [to_vote(row) for row in result.scalars().all()]
+
 
 class SqlAlchemyUserDirectory:
     """Lists the voter collection as ``DirectoryUser`` for eligibility + FE expansion (C8/C9)."""

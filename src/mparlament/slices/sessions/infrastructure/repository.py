@@ -53,14 +53,42 @@ class SqlAlchemySessionRepository:
 
 
 class SqlAlchemySpeakerRepository:
-    """Lists/adds speaker-registry rows (#39/#40)."""
+    """CRUD on speaker-registry rows (#39/#40/#41)."""
 
     async def list_all(self, session: AsyncSession) -> list[Speaker]:
         result = await session.execute(select(SpeakerModel).order_by(SpeakerModel.id))
         return [to_speaker(row) for row in result.scalars().all()]
 
+    async def get_by_id(self, session: AsyncSession, speaker_id: int) -> Speaker | None:
+        row = await session.get(SpeakerModel, speaker_id)
+        return to_speaker(row) if row else None
+
     async def add(self, session: AsyncSession, speaker: Speaker) -> Speaker:
-        row = SpeakerModel(name=speaker.name, club=speaker.club, role=speaker.role)
+        row = SpeakerModel(
+            name=speaker.name,
+            club=speaker.club,
+            role=speaker.role,
+            status=speaker.status,
+        )
         session.add(row)
         await session.flush()
         return to_speaker(row)
+
+    async def update(self, session: AsyncSession, speaker: Speaker) -> Speaker:
+        row = await session.get(SpeakerModel, speaker.id)
+        if row is None:
+            raise KeyError(speaker.id)
+        row.name = speaker.name
+        row.club = speaker.club
+        row.role = speaker.role
+        row.status = speaker.status
+        await session.flush()
+        return to_speaker(row)
+
+    async def delete(self, session: AsyncSession, speaker_id: int) -> bool:
+        row = await session.get(SpeakerModel, speaker_id)
+        if row is None:
+            return False
+        await session.delete(row)
+        await session.flush()
+        return True

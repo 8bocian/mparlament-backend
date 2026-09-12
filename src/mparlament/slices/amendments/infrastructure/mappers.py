@@ -24,6 +24,7 @@ def to_amendment(row: AmendmentModel) -> Amendment:
         createdAt=row.created_at,
         withdrawnReason=row.withdrawn_reason,
         changes=list(row.changes or []),
+        target=dict(row.target) if row.target else None,
     )
 
 
@@ -38,3 +39,4 @@ def apply_amendment(row: AmendmentModel, amendment: Amendment) -> None:
     row.created_at = amendment.createdAt
     row.withdrawn_reason = amendment.withdrawnReason
     row.changes = [asdict(c) for c in amendment.changes]
+    row.target = dict(amendment.target) if amendment.target else None

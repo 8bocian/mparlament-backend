@@ -88,7 +88,7 @@ class SessionListDTO(BaseModel):
 
 
 class SpeakerDTO(BaseModel):
-    """Speaker registry row (#39/#40)."""
+    """Speaker registry row (#39/#40/#41)."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -96,6 +96,7 @@ class SpeakerDTO(BaseModel):
     name: str
     club: str | None = None
     role: str | None = None
+    status: str = "waiting"
 
 
 class AddSpeakerInput(BaseModel):
@@ -104,3 +105,23 @@ class AddSpeakerInput(BaseModel):
     name: str
     club: str | None = None
     role: str | None = None
+
+
+class UpdateSpeakerInput(BaseModel):
+    """Body for ``PUT /api/speakers/:id`` **and** ``PUT /api/speakers`` (FE-compat)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: int | None = None
+    name: str | None = None
+    club: str | None = None
+    role: str | None = None
+    status: str | None = None
+
+
+class SetSpeakerStatusInput(BaseModel):
+    """``PATCH /api/speakers/:id/status`` body."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    status: str

@@ -24,5 +24,6 @@ def amendment_dict(amendment: Amendment) -> dict:
         "status": amendment.status,
         "createdAt": amendment.createdAt,
         "withdrawnReason": amendment.withdrawnReason,
+        "target": amendment.target,
         "changes": [asdict(c) for c in amendment.changes],
     }
